@@ -1,0 +1,34 @@
+{
+  "pacientes": [
+    {
+      "id": 1,
+      "nombre": "Juan Perez",
+      "tratamiento": "Implante"
+    },
+    {
+      "id": 2,
+      "nombre": "Maria Lopez",
+      "tratamiento": "Corona de zirconia"
+    },
+    {
+      "id": 3,
+      "nombre": "Carlos Gomez",
+      "tratamiento": "Protesis removible"
+    },
+    {
+      "id": 4,
+      "nombre": "string",
+      "tratamiento": "string"
+    },
+    {
+      "id": 5,
+      "nombre": "string",
+      "tratamiento": "string"
+    },
+    {
+      "id": 6,
+      "nombre": "Juan Pérez",
+      "tratamiento": "Implante actualizado"
+    }
+  ]
+}
