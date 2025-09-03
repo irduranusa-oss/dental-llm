@@ -4,20 +4,20 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Dental-LLM API")
 
-# Configuración CORS (para que funcione en Wix o local)
+# CORS (para que Wix o cualquier front pueda consumirlo)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # puedes cambiar * por tu dominio Wix si quieres
+    allow_origins=["*"],   # Puedes cambiar "*" por tu dominio Wix si quieres
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----------- Rutas -----------
+# ---------- Endpoints ----------
 
 @app.get("/")
 def home():
-    return "Dental-LLM corriendo en Render 🚀"
+    return "<h1>Dental-LLM corriendo en Render 🚀</h1>"
 
 @app.get("/info")
 def info():
@@ -31,5 +31,5 @@ def chat(p: Pregunta):
     if not p.pregunta.strip():
         raise HTTPException(status_code=400, detail="Falta 'pregunta'")
     
-    # Respuesta provisional (luego conectamos con OpenAI)
+    # Respuesta de prueba (luego conectamos OpenAI)
     return {"respuesta": f"Recibí tu pregunta: {p.pregunta}"}
