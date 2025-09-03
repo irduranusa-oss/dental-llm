@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,7 +18,7 @@ app.add_middleware(
 
 # ---------- Endpoints ----------
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def home():
     return "<h1>Dental-LLM corriendo en Render 🚀</h1>"
 
