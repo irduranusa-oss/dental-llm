@@ -1,13 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from openai import OpenAI
+import os
 
 app = FastAPI(title="Dental-LLM API")
 
-# CORS (para que Wix o cualquier front pueda consumirlo)
+# Configuración CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Puedes cambiar "*" por tu dominio Wix si quieres
+    allow_origins=["*"],   # Puedes cambiar "*" por tu dominio Wix
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,10 +28,28 @@ def info():
 class Pregunta(BaseModel):
     pregunta: str
 
+# Conexión con OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+
 @app.post("/chat")
 def chat(p: Pregunta):
     if not p.pregunta.strip():
         raise HTTPException(status_code=400, detail="Falta 'pregunta'")
-    
-    # Respuesta de prueba (luego conectamos OpenAI)
-    return {"respuesta": f"Recibí tu pregunta: {p.pregunta}"}
+    if not client.api_key:
+        return {"respuesta": "⚠️ Falta configurar OPENAI_API_KEY en Render"}
+
+    system_prompt = (
+        "Eres NochGPT, asistente dental práctico para un técnico protésico senior. "
+        "Responde en español, claro, breve y con pasos accionables."
+    )
+
+    try:
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{p.pregunta}"
+        )
+        texto = resp.output_text.strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error OpenAI: {e}")
+
+    return {"respuesta": texto}
