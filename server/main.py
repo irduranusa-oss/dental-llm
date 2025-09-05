@@ -6,64 +6,62 @@ from pydantic import BaseModel
 from openai import OpenAI
 import os, time, re
 
-# <<< IMPORTA LA CAJITA >>>
-# Usa import absoluto para que funcione en Render:
+# --- IMPORTA LA CAJITA (cache en memoria) ---
+# Nota: requiere server/__init__.py para import absoluto
 from server.cache import get_from_cache, save_to_cache
 
 app = FastAPI(title="Dental-LLM API")
 
-# ---- CORS (deja "*" mientras pruebas; luego pon tu dominio wix) ----
+# --- CORS (mientras pruebas, "*"; luego pon tu dominio de Wix) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # Ej.: ["https://www.dentodo.com"]
+    allow_origins=["*"],          # ejemplo: ["https://www.dentodo.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---- OpenAI ----
+# --- OpenAI client ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
-    print("⚠️ Falta OPENAI_API_KEY en las variables de entorno")
+    print("⚠️ Falta OPENAI_API_KEY en variables de entorno")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---- Modelo a usar (rápido y barato) ----
+# --- Modelo (rápido y económico) ---
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# ---- Prompt dental (responde en el mismo idioma del usuario) ----
+# --- Prompt dental (siempre responder en el mismo idioma del usuario) ---
 SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
 - Focus on dental topics (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
-- Be concise, practical, and cite ranges (e.g., temperatures or times) when relevant.
+- Be concise, practical, and provide ranges (e.g., temperatures or times) when relevant.
 - If the question is not dental-related, politely say you are focused on dental topics and offer a helpful redirection.
 - IMPORTANT: Always reply in the same language as the user's question.
 """
 
-# ---- Entrada para /chat ----
+# --- Entrada para /chat ---
 class ChatIn(BaseModel):
     pregunta: str
 
-# ---- Historial simple en memoria (opcional) ----
-HIST = []     # cada item: {"t":ts, "pregunta":..., "respuesta":...}
+# --- Historial simple en memoria (opcional) ---
+HIST = []      # cada item: {"t": timestamp, "pregunta": ..., "respuesta": ...}
 MAX_HIST = 200
 
 def detect_lang(text: str) -> str:
     """
-    Heurística simple para cachear por idioma.
-    No controla la respuesta (eso lo hace el prompt).
+    Heurística simple para la LLAVE de la cache.
+    La respuesta final la controla el SYSTEM_PROMPT (mismo idioma del usuario).
     """
     t = text.lower()
-    # marcas rápidas
     if re.search(r"[áéíóúñ¿¡]", t):
         return "es"
-    if re.search(r"[àâçéèêëîïôùûüÿœ]", t):
-        return "fr"
     if re.search(r"[ãõáéíóúç]", t):
         return "pt"
-    # por defecto
+    if re.search(r"[àâçéèêëîïôùûüÿœ]", t):
+        return "fr"
     return "en"
 
 def call_openai(question: str) -> str:
-    """Llama al modelo con system prompt dental y respuesta en mismo idioma."""
+    """Llama al modelo con el system prompt dental."""
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -78,7 +76,7 @@ def call_openai(question: str) -> str:
         print("OpenAI error:", e)
         raise HTTPException(status_code=500, detail="Error con el modelo")
 
-# ---- Rutas ----
+# --- Rutas ---
 @app.get("/", response_class=HTMLResponse)
 def home():
     return "<h3>Dental-LLM corriendo ✅</h3>"
@@ -89,19 +87,18 @@ def chat(body: ChatIn):
     if not q:
         raise HTTPException(status_code=400, detail="Falta 'pregunta'")
 
-    # 1) detecta idioma para la LLAVE de la cache (la respuesta igual
-    #    saldrá en ese idioma gracias al SYSTEM_PROMPT)
+    # 1) Idioma solo para la LLAVE de cache
     lang = detect_lang(q)
 
-    # 2) intenta responder desde la CAJA
+    # 2) Intentar cache
     cached = get_from_cache(q, lang)
     if cached is not None:
         return {"respuesta": cached, "cached": True}
 
-    # 3) llama al modelo
+    # 3) Llamar al modelo
     a = call_openai(q)
 
-    # 4) guarda en cache y en historial
+    # 4) Guardar cache + historial
     save_to_cache(q, lang, a)
     HIST.append({"t": time.time(), "pregunta": q, "respuesta": a})
     if len(HIST) > MAX_HIST:
@@ -109,12 +106,12 @@ def chat(body: ChatIn):
 
     return {"respuesta": a, "cached": False}
 
-# Compatibilidad: si tu front aún llama /chat_multi, que funcione igual
+# Compatibilidad: /chat_multi sigue funcionando igual
 @app.post("/chat_multi")
 def chat_multi(body: ChatIn):
     return chat(body)
 
-# Historial (opcional, para tu widget)
+# Historial para tu widget
 @app.get("/history")
 def history(q: str = "", limit: int = 10):
     q = (q or "").strip().lower()
