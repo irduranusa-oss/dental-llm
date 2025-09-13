@@ -3,3 +3,4 @@ uvicorn
 requests
 python-multipart
 openai
+google-genai==1.6.0
