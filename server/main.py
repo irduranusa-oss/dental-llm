@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from openai import OpenAI
-import os, time, re, requests, mimetypes, base64
+import os, time, re, requests, mimetypes, base64, pathlib
 
 # --- IMPORTA LA CAJITA (cache en memoria) ---
 # Nota: requiere server/__init__.py para import absoluto
@@ -32,8 +32,8 @@ if not OPENAI_API_KEY:
     print("⚠️ Falta OPENAI_API_KEY en variables de entorno")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")        # chat + visión
-OPENAI_TEMP  = float(os.getenv("OPENAI_TEMP", "0.2"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # chat + visión
+OPENAI_TEMP = float(os.getenv("OPENAI_TEMP", "0.2"))
 
 SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
 - Focus on dental topics (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
@@ -116,7 +116,7 @@ def extract_pdf_text(pdf_path: str, max_chars: int = 20000) -> str:
     Devuelve texto recortado a max_chars.
     """
     try:
-        import PyPDF2  # requiere PyPDF2 en requirements.txt
+        import PyPDF2  # requiere PyPDF2==3.0.1 en requirements.txt
     except Exception as e:
         print("PyPDF2 no disponible:", e)
         return ""
@@ -200,7 +200,7 @@ WHATSAPP_TOKEN    = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "nochgpt-verify-123")
 
-FB_API  = "https://graph.facebook.com/v20.0"
+FB_API = "https://graph.facebook.com/v20.0"
 
 def _e164_no_plus(num: str) -> str:
     num = (num or "").strip().replace(" ", "").replace("-", "")
@@ -226,7 +226,7 @@ def wa_send_text(to_number: str, body: str):
     }
     try:
         r = requests.post(_wa_base_url(), headers=headers, json=data, timeout=20)
-        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw": r.text}
+        j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text}
         return {"ok": r.ok, "status": r.status_code, "resp": j}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -237,16 +237,19 @@ def wa_get_media_url(media_id: str) -> str:
     r.raise_for_status()
     return (r.json() or {}).get("url", "")
 
-def wa_download_media(signed_url: str, dest_prefix: str = "/tmp/wa_media") -> tuple[str, str]:
+def wa_download_media(signed_url: str, dest_prefix: str = "/tmp/wa_media/") -> tuple[str, str]:
+    # Asegura carpeta
+    pathlib.Path(dest_prefix).mkdir(parents=True, exist_ok=True)
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     r = requests.get(signed_url, headers=headers, stream=True, timeout=30)
     r.raise_for_status()
     mime = r.headers.get("Content-Type", "application/octet-stream")
     ext = mimetypes.guess_extension(mime) or ""
-    path = f"{dest_prefix}{int(time.time())}{ext}"
+    path = os.path.join(dest_prefix, f"{int(time.time())}{ext}")
     with open(path, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
-            if chunk: f.write(chunk)
+            if chunk:
+                f.write(chunk)
     return path, mime
 
 # --- VERIFICACIÓN (GET) ---
@@ -295,7 +298,8 @@ async def webhook_handler(request: Request):
                     answer = call_openai(user_text)
                 except Exception:
                     answer = "Lo siento, tuve un problema procesando tu mensaje."
-                if from_number: wa_send_text(from_number, answer)
+                if from_number:
+                    wa_send_text(from_number, answer)
                 return {"status": "ok"}
 
             # 2) Imagen
