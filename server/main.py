@@ -1,7 +1,7 @@
 # server/main.py
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import os, time, re, requests
@@ -132,21 +132,30 @@ def history(q: str = "", limit: int = 10):
             break
     return list(reversed(out))
 
-# =========================
-#    WHATSAPP WEBHOOK
-# =========================
+# ======================================================================
+#                         WHATSAPP WEBHOOK
+#   - GET  /webhook : verificación (hub.challenge)
+#   - POST /webhook : recepción y auto-respuesta con tu LLM
+# ======================================================================
 
 WHATSAPP_TOKEN    = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "nochgpt-verify-123")
 
-WA_BASE = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
+def _e164_no_plus(num: str) -> str:
+    """Normaliza a E.164 sin '+' (Meta acepta sin '+')."""
+    num = (num or "").strip().replace(" ", "").replace("-", "")
+    return num[1:] if num.startswith("+") else num
+
+def _wa_base_url() -> str:
+    """Construye la URL en base al PHONE_ID actual (por seguridad)."""
+    return f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
 
 def wa_send_text(to_number: str, body: str):
     """Envía texto por la Cloud API."""
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
         print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
-        return {"error": "missing_credentials"}
+        return {"ok": False, "error": "missing_credentials"}
 
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -154,23 +163,24 @@ def wa_send_text(to_number: str, body: str):
     }
     data = {
         "messaging_product": "whatsapp",
-        "to": to_number,
+        "to": _e164_no_plus(to_number),
         "type": "text",
-        "text": {"body": body[:3900]},  # margen < 4096 chars
+        "text": {"preview_url": False, "body": body[:3900]},  # < 4096 chars
     }
-    r = requests.post(WA_BASE, headers=headers, json=data, timeout=15)
     try:
-        return r.json()
-    except Exception:
-        return {"status_code": r.status_code, "text": r.text}
+        r = requests.post(_wa_base_url(), headers=headers, json=data, timeout=20)
+        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw": r.text}
+        return {"ok": r.ok, "status": r.status_code, "resp": j}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 # --- VERIFICACIÓN (GET) ---
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     # Meta envía: hub.mode, hub.verify_token, hub.challenge
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
+    mode = request.query_params.get("hub.mode", "")
+    token = request.query_params.get("hub.verify_token", "")
+    challenge = request.query_params.get("hub.challenge", "")
 
     print("WEBHOOK VERIFY =>", {"mode": mode, "token": token, "challenge": challenge})
 
@@ -178,20 +188,24 @@ async def verify_webhook(request: Request):
     if mode == "subscribe" and token == META_VERIFY_TOKEN and challenge:
         return PlainTextResponse(content=challenge, status_code=200)
 
-    return PlainTextResponse(content="token invalido", status_code=403)
-
+    return PlainTextResponse(content="forbidden", status_code=403)
 
 # --- RECEPCIÓN DE MENSAJES (POST) ---
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        # Meta requiere 200 siempre; devuelve algo útil para logs
+        return JSONResponse({"received": False, "error": "invalid_json"})
+
     print("📩 Payload recibido:", data)
 
     try:
-        entry = data.get("entry", [])[0]
-        changes = entry.get("changes", [])[0]
-        value = changes.get("value", {})
-        msgs = value.get("messages", [])
+        entry   = (data.get("entry") or [{}])[0]
+        changes = (entry.get("changes") or [{}])[0]
+        value   = changes.get("value") or {}
+        msgs    = value.get("messages") or []
 
         if not msgs:
             return {"status": "no_message"}
@@ -200,22 +214,29 @@ async def webhook_handler(request: Request):
         from_number = msg.get("from")
         mtype = msg.get("type")
 
+        # Soportar texto y botones; para otros tipos, envía acuse simple
         if mtype == "text":
-            user_text = msg.get("text", {}).get("body", "").strip()
+            user_text = (msg.get("text") or {}).get("body", "").strip()
         elif mtype == "button":
-            user_text = msg.get("button", {}).get("text", "").strip()
+            user_text = (msg.get("button") or {}).get("text", "").strip()
         else:
-            user_text = "(mensaje recibido)"
+            user_text = ""
 
-        try:
-            answer = call_openai(user_text) if user_text else "Hola 👋"
-        except Exception:
-            answer = "Lo siento, tuve un problema procesando tu mensaje."
+        # Respuesta: LLM si hay texto, si no un saludo
+        if user_text:
+            try:
+                answer = call_openai(user_text)
+            except Exception:
+                answer = "Lo siento, tuve un problema procesando tu mensaje."
+        else:
+            answer = "Hola 👋, recibí tu mensaje."
 
-        wa_send_text(from_number, answer)
+        if from_number:
+            wa_send_text(from_number, answer)
+
+        # Siempre 200 OK para Meta
+        return {"status": "ok"}
 
     except Exception as e:
         print("❌ Error en webhook:", e)
-
-    # 200 OK SIEMPRE
-    return {"status": "ok"}
+        return {"status": "error", "detail": str(e)}
