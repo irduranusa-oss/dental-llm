@@ -1,34 +1,33 @@
-# server/main.py — NochGPT v3 (WhatsApp + Handoff + Planes/Precios + LLM + Panel)
+# server/main.py — NochGPT v3.1 (menú automático + precios + humano)
 # ---------------------------------------------------------------------------------
-# ✅ Webhook Meta (GET verify + POST mensajes)
-# ✅ Botones "Planes/Precios", "Sitio web", "Hablar con humano"
-# ✅ Flujo "Hablar con humano": guarda tickets en /tmp/handoff.json y confirma
-# ✅ Dedupe por message_id (evita respuestas dobles)
-# ✅ Healthcheck /_debug/health, listado /tickets, JSON /handoff y panel /panel
-# ✅ LLM fallback (OpenAI) que responde en el idioma del usuario
-# ✅ Detección simple de idioma (es/en/pt/fr/ar/hi/ru/zh/ja)
+# ✅ Webhook Meta (GET verify + POST)
+# ✅ Menú con botones: "Ver planes", "Sitio web", "Hablar con humano"
+# ✅ Muestra botones: (1) primer mensaje de un número, (2) saludos/menú, (3) cuando piden precios/planes
+# ✅ Handoff humano: guarda ticket en /tmp/handoff.json y confirma
+# ✅ De-dup por message_id, healthcheck, /tickets, /handoff, /panel
+# ✅ LLM fallback (OpenAI) responde en el idioma detectado
 # ---------------------------------------------------------------------------------
 
 from __future__ import annotations
-import os, json, time, re, pathlib, mimetypes, base64, typing, requests
+import os, json, time, re, typing, requests
 from collections import deque
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
-from pydantic import BaseModel
 
 # ---------- Config ----------
-OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL     = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-WA_TOKEN         = os.getenv("WHATSAPP_TOKEN", "")
-WA_PHONE_ID      = os.getenv("WHATSAPP_PHONE_ID", "")
-META_VERIFY_TOKEN= os.getenv("META_VERIFY_TOKEN", "")
-PLANS_URL        = os.getenv("PLANS_URL", "https://www.dentodo.com/plans-pricing")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL      = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+WA_TOKEN          = os.getenv("WHATSAPP_TOKEN", "")
+WA_PHONE_ID       = os.getenv("WHATSAPP_PHONE_ID", "")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
+PLANS_URL         = os.getenv("PLANS_URL", "https://www.dentodo.com/plans-pricing")
 
-HANDOFF_FILE     = "/tmp/handoff.json"
-SEEN_MSGS        = deque(maxlen=500)   # de-dup message_id
-USER_STATE: dict[str,str] = {}         # estado por número (waiting_handoff/done)
-LAST_LANG: dict[str,str] = {}          # último idioma detectado por número
+HANDOFF_FILE      = "/tmp/handoff.json"
+SEEN_MSGS         = deque(maxlen=500)   # de-dup message_id
+USER_STATE: dict[str,str] = {}          # waiting_handoff/done
+LAST_LANG: dict[str,str] = {}           # idioma por número
+FIRST_SEEN: set[str] = set()            # números que ya recibieron menú
 
 # ---------- App ----------
 app = FastAPI(title="Dental-LLM API")
@@ -38,7 +37,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# ---------- Utils ----------
+# ---------- Utilidades ----------
 def now_ts() -> int: return int(time.time())
 
 def read_handoff() -> list[dict]:
@@ -46,7 +45,8 @@ def read_handoff() -> list[dict]:
     try:
         with open(HANDOFF_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except: return []
+    except:
+        return []
 
 def append_handoff(record: dict):
     data = read_handoff()
@@ -59,35 +59,32 @@ def append_handoff(record: dict):
 
 def detect_lang(s: str) -> str:
     s = (s or "").strip()
-    # bloques Unicode básicos (muy simple pero útil)
-    if re.search(r"[\u0600-\u06FF]", s): return "ar"  # árabe
-    if re.search(r"[\u0900-\u097F]", s): return "hi"  # hindi
-    if re.search(r"[\u0400-\u04FF]", s): return "ru"  # cirílico
-    if re.search(r"[\u4E00-\u9FFF]", s): return "zh"  # chino
-    if re.search(r"[\u3040-\u30FF]", s): return "ja"  # japonés
-    sL = s.lower()
-    if re.search(r"[áéíóúñ¿¡]", sL): return "es"
-    if re.search(r"[ãõáéíóúç]", sL): return "pt"
-    if re.search(r"[àâçéèêëîïôùûüÿœ]", sL): return "fr"
+    if re.search(r"[\u0600-\u06FF]", s): return "ar"
+    if re.search(r"[\u0900-\u097F]", s): return "hi"
+    if re.search(r"[\u0400-\u04FF]", s): return "ru"
+    if re.search(r"[\u4E00-\u9FFF]", s): return "zh"
+    if re.search(r"[\u3040-\u30FF]", s): return "ja"
+    sl = s.lower()
+    if re.search(r"[áéíóúñ¿¡]", sl): return "es"
+    if re.search(r"[ãõáéíóúç]", sl): return "pt"
+    if re.search(r"[àâçéèêëîïôùûüÿœ]", sl): return "fr"
     return "en"
 
 def same_lang_reply(lang: str, text_map: dict) -> str:
     return text_map.get(lang, text_map.get("en"))
 
-# ---------- WhatsApp senders ----------
+# ---------- WhatsApp helpers ----------
 def wa_api_url() -> str:
-    if not WA_PHONE_ID: return ""
-    return f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
+    return f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages" if WA_PHONE_ID else ""
 
 def wa_send(payload: dict):
-    if not (WA_TOKEN and WA_PHONE_ID):
+    if not (WA_TOKEN and WA_PHONE_ID): 
         print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
         return
     try:
         r = requests.post(
             wa_api_url(),
-            headers={"Authorization": f"Bearer {WA_TOKEN}",
-                     "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"},
             json=payload, timeout=20
         )
         print("WA SEND:", r.status_code, r.text[:300])
@@ -97,7 +94,7 @@ def wa_send(payload: dict):
 def wa_send_text(to: str, body: str):
     wa_send({"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":body}})
 
-def wa_send_buttons_prices(to: str, lang: str):
+def wa_send_buttons_menu(to: str, lang: str):
     T = {
         "es": {"body":"¿Qué te gustaría hacer?","b1":"Ver planes","b2":"Sitio web","b3":"Hablar con humano"},
         "en": {"body":"What would you like to do?","b1":"See plans","b2":"Website","b3":"Talk to human"},
@@ -110,7 +107,7 @@ def wa_send_buttons_prices(to: str, lang: str):
         "ja": {"body":"何をしますか？","b1":"プランを見る","b2":"サイト","b3":"人と話す"},
     }
     t = T.get(lang, T["en"])
-    payload = {
+    wa_send({
         "messaging_product":"whatsapp","to":to,"type":"interactive",
         "interactive":{
             "type":"button","body":{"text":t["body"]},
@@ -120,32 +117,26 @@ def wa_send_buttons_prices(to: str, lang: str):
                 {"type":"reply","reply":{"id":"humano","title":t["b3"]}},
             ]}
         }
-    }
-    wa_send(payload)
+    })
 
-# ---------- LLM (OpenAI) ----------
+# ---------- LLM ----------
 def llm_answer(user_text: str, lang: str) -> str:
     if not OPENAI_API_KEY:
         return same_lang_reply(lang, {
-            "es":"Configuración incompleta: falta OPENAI_API_KEY.",
-            "en":"Setup incomplete: missing OPENAI_API_KEY.",
-            "pt":"Falta OPENAI_API_KEY.",
+            "es":"Falta OPENAI_API_KEY en el servidor.",
+            "en":"Missing OPENAI_API_KEY on server.",
+            "pt":"Falta OPENAI_API_KEY no servidor."
         })
-    import openai  # sdk oficial retro-compatible
+    import openai
     openai.api_key = OPENAI_API_KEY
-    system = (
-        "You are NochGPT, a helpful dental laboratory assistant. "
-        "Focus strictly on dental topics (prosthetics, implants, zirconia, CAD/CAM). "
-        "Always reply in the user's language."
-    )
+    system = ("You are NochGPT, a helpful dental laboratory assistant. "
+              "Focus on dental topics (prosthetics, implants, zirconia, CAD/CAM). "
+              "Always reply in the user's language.")
     try:
         resp = openai.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0.2,
-            messages=[
-                {"role":"system","content":system},
-                {"role":"user","content":user_text}
-            ]
+            model=OPENAI_MODEL, temperature=0.2,
+            messages=[{"role":"system","content":system},
+                      {"role":"user","content":user_text}]
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -153,88 +144,96 @@ def llm_answer(user_text: str, lang: str) -> str:
         return same_lang_reply(lang, {
             "es":"No pude generar respuesta ahora.",
             "en":"I couldn’t generate a reply right now.",
-            "pt":"Não consegui responder agora.",
+            "pt":"Não consegui responder agora."
         })
 
-# ---------- Interceptores de texto ----------
-PRICE_WORDS = r"\b(precio|precios|plan(es)?|cotizar|tienda|prices?|plans?)\b"
+# ---------- Reglas de activación ----------
+PRICE_WORDS = r"(precio|precios|plan|planes|cotizar|tienda|price|prices|plan|plans)"
+MENU_WORDS  = r"(hola|buenas|men[uú]|opciones|menu|start|inicio|help|ayuda|hi|hello)"
+HUMAN_WORDS = r"(humano|asesor|soporte|operator|agent|agente|hablar con humano|speak to human|help me)"
 
 def handle_text(from_num: str, text: str) -> bool:
-    """Devuelve True si ya respondió y NO debe seguir al LLM."""
+    """True = ya respondí; False = que siga al LLM."""
     lang = detect_lang(text)
     LAST_LANG[from_num] = lang
     t = text.strip().lower()
 
-    # Botón: planes/precios
-    if re.search(PRICE_WORDS, t):
-        wa_send_buttons_prices(from_num, lang)
-        return True
-
-    # Handoff: pedir humano
-    if "hablar con humano" in t or "human" in t or "humano" in t:
-        USER_STATE[from_num] = "waiting_handoff"
+    # 0) Primer mensaje de este número → mostrar menú
+    if from_num not in FIRST_SEEN:
+        FIRST_SEEN.add(from_num)
+        wa_send_buttons_menu(from_num, lang)
+        # Mensaje de bienvenida corto
         wa_send_text(from_num, same_lang_reply(lang, {
-            "es":"👤 Te conecto con un asesor. Comparte: nombre, tema y horario (y teléfono si es otro).",
-            "en":"👤 I’ll connect you with a human. Please send: name, topic and preferred time (and phone if different).",
-            "pt":"👤 Vou te conectar a um assessor. Envie: nome, tema e horário (e telefone, se outro).",
-            "fr":"👤 Je te mets en contact. Envoie : nom, sujet et horaire (téléphone si différent).",
-            "ru":"👤 Соединю с консультантом. Напишите: имя, тема и время (и телефон, если другой).",
-            "ar":"👤 سأوصلك بمستشار. أرسل: الاسم، الموضوع والوقت المفضل (ورقم مختلف إن وُجد).",
-            "hi":"👤 मैं आपको सलाहकार से जोड़ूँगा। भेजें: नाम, विषय और समय (दूसरा फोन हो तो).",
-            "zh":"👤 我将为你转人工。请发送：姓名、主题和时间（若有其他电话也请写）。",
-            "ja":"👤 担当者にお繋ぎします。お名前・用件・希望時間（別番号があれば）を送ってください。",
+            "es":"¡Hola! ¿En qué puedo ayudarte hoy en el ámbito dental?",
+            "en":"Hi! How can I help you today with dental topics?",
+            "pt":"Olá! Como posso ajudar você hoje em temas dentários?",
+            "fr":"Salut ! Comment puis-je t’aider sur les sujets dentaires ?",
+            "ru":"Привет! Чем помочь по стоматологии?",
+            "ar":"مرحبًا! كيف أساعدك اليوم بموضوعات طب الأسنان؟",
+            "hi":"नमस्ते! दंत विषयों में आज मैं आपकी कैसे मदद करूँ?",
+            "zh":"你好！今天我可以如何在牙科方面帮助你？",
+            "ja":"こんにちは！歯科に関して今日は何をお手伝いできますか？",
         }))
         return True
 
-    # Si usuario está completando datos del ticket
+    # 1) Menú por saludo/“menú”
+    if re.search(MENU_WORDS, t):
+        wa_send_buttons_menu(from_num, lang)
+        return True
+
+    # 2) Menú por intención de precios/planes
+    if re.search(PRICE_WORDS, t):
+        wa_send_buttons_menu(from_num, lang)
+        return True
+
+    # 3) Handoff humano por palabra clave/sinónimo
+    if re.search(HUMAN_WORDS, t):
+        USER_STATE[from_num] = "waiting_handoff"
+        wa_send_text(from_num, same_lang_reply(lang, {
+            "es":"👤 Te conecto con un asesor. Escribe: nombre, tema y horario (y teléfono si es otro).",
+            "en":"👤 I’ll connect you with a human. Send: name, topic and preferred time (phone if different).",
+            "pt":"👤 Vou te conectar a um assessor. Envie: nome, tema e horário (telefone se for outro)."
+        }))
+        return True
+
+    # 4) Si está completando ticket
     if USER_STATE.get(from_num) == "waiting_handoff":
-        record = {
-            "ts": now_ts(), "label":"NochGPT",
-            "from": from_num,
+        append_handoff({
+            "ts": now_ts(), "label":"NochGPT", "from": from_num,
             "nombre":"", "tema": text[:120], "contacto": from_num,
             "horario":"", "mensaje": text
-        }
-        append_handoff(record)
+        })
         USER_STATE[from_num] = "done"
         wa_send_text(from_num, same_lang_reply(lang, {
             "es":"✅ Gracias. Tu solicitud fue registrada; un asesor te contactará en breve.",
             "en":"✅ Thanks. Your request was recorded; an agent will contact you soon.",
-            "pt":"✅ Obrigado. Seu pedido foi registrado; entraremos em contato.",
-            "fr":"✅ Merci. Votre demande a été enregistrée ; un agent vous contactera bientôt.",
-            "ru":"✅ Спасибо. Заявка записана; с вами свяжется специалист.",
-            "ar":"✅ شكرًا. تم تسجيل طلبك وسيتواصل معك مستشار قريبًا.",
-            "hi":"✅ धन्यवाद. आपका अनुरोध दर्ज हो गया; कोई प्रतिनिधि आपसे संपर्क करेगा।",
-            "zh":"✅ 感谢。已登记请求；稍后会有同事联系你。",
-            "ja":"✅ ありがとうございます。担当よりご連絡します。",
+            "pt":"✅ Obrigado. Seu pedido foi registrado; entraremos em contato."
         }))
         return True
 
-    return False  # que siga al LLM
+    return False
 
-# ---------- Rutas públicas ----------
+# ---------- Rutas ----------
 @app.get("/", response_class=HTMLResponse)
 def root():
     return "<b>Dental-LLM corriendo ✅</b>"
 
 @app.get("/_debug/health")
 def health():
-    cfg = {
+    return {"ok": True, "cfg":{
         "openai": bool(OPENAI_API_KEY),
         "wa_token": bool(WA_TOKEN),
         "wa_phone_id": bool(WA_PHONE_ID),
         "model": OPENAI_MODEL,
         "sheet_webhook": False,
         "switch_number": False
-    }
-    return {"ok": True, "cfg": cfg}
+    }}
 
 @app.get("/handoff")
-def get_handoff():
-    return read_handoff()
+def get_handoff(): return read_handoff()
 
 @app.get("/tickets")
-def get_tickets():
-    return read_handoff()
+def get_tickets(): return read_handoff()
 
 @app.get("/panel", response_class=HTMLResponse)
 def panel():
@@ -243,8 +242,7 @@ def panel():
         "<html><head><meta charset='utf-8'><title>Tickets – NochGPT</title>",
         "<style>body{font-family:system-ui;background:#0b1b3f;color:#fff}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #234}th{background:#123}tr:hover{background:#112}</style>",
         "</head><body>",
-        "<h2>Tickets – NochGPT <span style='background:#1b5fff;padding:6px 10px;border-radius:10px'>"
-        f"{len(rows)} activos</span></h2>",
+        f"<h2>Tickets – NochGPT <span style='background:#1b5fff;padding:6px 10px;border-radius:10px'>{len(rows)} activos</span></h2>",
         "<small>Se actualiza al refrescar · Origen: /tmp/handoff.json</small>",
         "<table><thead><tr><th>Fecha/Hora</th><th>Número</th><th>Nombre</th><th>Tema</th><th>Contacto</th></tr></thead><tbody>"
     ]
@@ -255,41 +253,38 @@ def panel():
     html.append("</tbody></table></body></html>")
     return "\n".join(html)
 
-# ---------- Webhook Meta (GET verify + POST inbound) ----------
+# ---------- Webhook Meta ----------
 @app.get("/webhook")
 def webhook_verify(request: Request):
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == META_VERIFY_TOKEN:
-        return PlainTextResponse(challenge or "")
+    qp = request.query_params
+    if qp.get("hub.mode") == "subscribe" and qp.get("hub.verify_token") == META_VERIFY_TOKEN:
+        return PlainTextResponse(qp.get("hub.challenge",""))
     raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.post("/webhook")
 async def webhook_post(req: Request):
     data = await req.json()
-    print("Payload recibido:", str(data)[:800])
+    print("Payload:", str(data)[:800])
 
     entry = (data.get("entry") or [{}])[0]
     changes = (entry.get("changes") or [{}])[0]
     value = changes.get("value", {})
     messages = value.get("messages", [])
     if not messages:
-        return {"status":"ok"}  # acks de entrega, etc.
+        return {"status":"ok"}
 
     for m in messages:
         msg_id = m.get("id")
         if msg_id in SEEN_MSGS:
-            print("👀 Duplicado, ignorado:", msg_id)
+            print("👀 Duplicado:", msg_id)
             continue
         SEEN_MSGS.append(msg_id)
 
         from_num = m.get("from")
-        msg_type = m.get("type")
+        mtype = m.get("type")
 
-        # 1) Respuesta a botones
-        if msg_type == "interactive":
+        # Botón pulsado
+        if mtype == "interactive":
             inter = m.get("interactive", {})
             if inter.get("type") == "button_reply":
                 bid = inter["button_reply"]["id"]
@@ -308,34 +303,30 @@ async def webhook_post(req: Request):
                     }))
                     continue
                 if bid == "web":
-                    wa_send_text(from_num, PLANS_URL)
-                    continue
+                    wa_send_text(from_num, PLANS_URL); continue
                 if bid == "humano":
                     USER_STATE[from_num] = "waiting_handoff"
                     wa_send_text(from_num, same_lang_reply(lang, {
-                        "es":"👤 Te conecto con un asesor. Comparte: nombre, tema y horario.",
-                        "en":"👤 I’ll connect you with a human. Please send: name, topic, time.",
-                        "pt":"👤 Vou te conectar a um assessor. Envie: nome, tema, horário.",
+                        "es":"👤 Te conecto con un asesor. Escribe: nombre, tema y horario.",
+                        "en":"👤 I’ll connect you with a human. Send: name, topic, time.",
+                        "pt":"👤 Vou te conectar a um assessor. Envie: nome, tema e horário.",
                     }))
                     continue
 
-        # 2) Mensaje de texto normal
-        if msg_type == "text":
-            user_text = m.get("text",{}).get("body","")
-            # interceptores
-            handled = handle_text(from_num, user_text)
-            if handled:
+        # Texto normal
+        if mtype == "text":
+            body = m.get("text",{}).get("body","")
+            if handle_text(from_num, body):
                 continue
-            # si no fue interceptado → LLM
-            lang = detect_lang(user_text)
-            answer = llm_answer(user_text, lang)
-            wa_send_text(from_num, answer)
-            continue
+            # Si no gatilló nada, respondemos con LLM
+            lang = detect_lang(body)
+            wa_send_text(from_num, llm_answer(body, lang))
+            return {"status":"ok"}
 
-        # 3) Otros tipos (audio, imagen, etc.) → simple aviso
+        # Otros tipos (audio, imagen…)
         lang = LAST_LANG.get(from_num, "es")
         wa_send_text(from_num, same_lang_reply(lang, {
-            "es":"Recibí tu mensaje. Por ahora entiendo mejor texto 😉",
+            "es":"Recibí tu mensaje. Por ahora entiendo mejor el texto 😉",
             "en":"I received your message. For now I understand text best 😉",
             "pt":"Recebi sua mensagem. No momento entendo melhor texto 😉",
         }))
