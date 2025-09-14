@@ -181,6 +181,29 @@ def transcribe_audio_with_openai(audio_path: str) -> str:
             print("Transcripción falló:", e2)
             return ""
 
+# --- Respuestas rápidas para botones ---
+def reply_for_button(text: str) -> str | None:
+    t = (text or "").strip().lower()
+    if t == "precios":
+        return (
+            "🧾 *Precios base (ejemplo)*\n"
+            "- Zirconia monolítica unidad: $XX–$YY\n"
+            "- Coronas e.max: $XX–$YY\n"
+            "- Implantes (pilar + corona): $XX–$YY\n"
+            "Si me dices el caso (pieza, material, # de unidades), te doy un rango más preciso."
+        )
+    if t == "hablar con humano":
+        return "👤 Te conecto con un asesor. Comparte tu nombre y el tema (implante, zirconia, urgencia) y te contactamos."
+    if t == "planes":
+        return (
+            "📅 *Planes y tiempos típicos*\n"
+            "- Unidad zirconia: diseño 24–48 h, sinterizado 6–8 h, entrega 2–3 días.\n"
+            "- Carillas: 3–5 días.\n"
+            "- Implante (pilar + corona): según oseointegración, 2–3 semanas para la corona definitiva.\n"
+            "Cuéntame tu caso y ajusto el plan."
+        )
+    return None
+
 # ----------------------------
 # Rutas base
 # ----------------------------
@@ -378,6 +401,14 @@ async def webhook_handler(request: Request):
                 user_text = ""
 
             if user_text:
+                # Primero: respuestas fijas por botón
+                fixed = reply_for_button(user_text)
+                if fixed:
+                    if from_number:
+                        wa_send_text(from_number, fixed)
+                    return {"status": "ok"}
+
+                # Si no coincidió con un botón, usar el LLM
                 try:
                     lang = detect_lang(user_text)
                     answer = call_openai(user_text, lang_hint=lang)
