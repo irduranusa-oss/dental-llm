@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from openai import OpenAI
-import os, time, re, requests
+import os, time, re, requests, mimetypes
 
 # --- IMPORTA LA CAJITA (cache en memoria) ---
 # Nota: requiere server/__init__.py para import absoluto
@@ -135,12 +135,14 @@ def history(q: str = "", limit: int = 10):
 # ======================================================================
 #                         WHATSAPP WEBHOOK
 #   - GET  /webhook : verificación (hub.challenge)
-#   - POST /webhook : recepción y auto-respuesta con tu LLM
+#   - POST /webhook : recepción y auto-respuesta (texto, botones, imagen, documento)
 # ======================================================================
 
 WHATSAPP_TOKEN    = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "nochgpt-verify-123")
+
+FB_API  = "https://graph.facebook.com/v20.0"
 
 def _e164_no_plus(num: str) -> str:
     """Normaliza a E.164 sin '+' (Meta acepta sin '+')."""
@@ -149,7 +151,7 @@ def _e164_no_plus(num: str) -> str:
 
 def _wa_base_url() -> str:
     """Construye la URL en base al PHONE_ID actual (por seguridad)."""
-    return f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
+    return f"{FB_API}/{WHATSAPP_PHONE_ID}/messages"
 
 def wa_send_text(to_number: str, body: str):
     """Envía texto por la Cloud API."""
@@ -173,6 +175,34 @@ def wa_send_text(to_number: str, body: str):
         return {"ok": r.ok, "status": r.status_code, "resp": j}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+def wa_get_media_url(media_id: str) -> str:
+    """Paso 1: con el media_id, obtén la URL temporal firmada desde Graph."""
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    r = requests.get(f"{FB_API}/{media_id}", headers=headers, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    return j.get("url", "")
+
+def wa_download_media(signed_url: str, dest_prefix: str = "/tmp/wa_media") -> tuple[str, str]:
+    """
+    Paso 2: descarga el binario usando la URL firmada.
+    Devuelve (ruta_archivo, mimetype).
+    """
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    r = requests.get(signed_url, headers=headers, stream=True, timeout=30)
+    r.raise_for_status()
+
+    mime = r.headers.get("Content-Type", "application/octet-stream")
+    ext = mimetypes.guess_extension(mime) or ""
+    dest_path = f"{dest_prefix}{int(time.time())}{ext}"
+
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+    return dest_path, mime
 
 # --- VERIFICACIÓN (GET) ---
 @app.get("/webhook")
@@ -208,13 +238,14 @@ async def webhook_handler(request: Request):
         msgs    = value.get("messages") or []
 
         if not msgs:
+            # También pueden llegar "statuses" (entregas, lectura, etc.)
             return {"status": "no_message"}
 
         msg = msgs[0]
         from_number = msg.get("from")
         mtype = msg.get("type")
 
-        # Soportar texto y botones; para otros tipos, envía acuse simple
+        # ---------- TEXTO / BOTÓN ----------
         if mtype == "text":
             user_text = (msg.get("text") or {}).get("body", "").strip()
         elif mtype == "button":
@@ -222,19 +253,61 @@ async def webhook_handler(request: Request):
         else:
             user_text = ""
 
-        # Respuesta: LLM si hay texto, si no un saludo
         if user_text:
             try:
                 answer = call_openai(user_text)
             except Exception:
                 answer = "Lo siento, tuve un problema procesando tu mensaje."
-        else:
-            answer = "Hola 👋, recibí tu mensaje."
+            if from_number:
+                wa_send_text(from_number, answer)
+            return {"status": "ok"}
 
+        # ---------- IMAGEN ----------
+        if mtype == "image":
+            media_id = (msg.get("image") or {}).get("id")
+            caption  = (msg.get("image") or {}).get("caption") or ""
+            if media_id and from_number:
+                try:
+                    url = wa_get_media_url(media_id)
+                    path, mime = wa_download_media(url)
+                    print(f"🖼️ Imagen guardada en {path} ({mime})")
+                    reply = "🖼️ Recibí tu imagen."
+                    if caption.strip():
+                        reply += f"\n📎 *Caption:* {caption.strip()}"
+                    reply += "\n\n¿Qué te gustaría analizar de esta imagen?"
+                    wa_send_text(from_number, reply)
+                except Exception as e:
+                    print("Error descargando imagen:", e)
+                    wa_send_text(from_number, "No pude descargar la imagen. ¿Puedes intentar de nuevo?")
+            return {"status": "ok"}
+
+        # ---------- DOCUMENTO (PDF/Word/etc.) ----------
+        if mtype == "document":
+            doc = msg.get("document") or {}
+            media_id = doc.get("id")
+            filename = doc.get("filename") or "archivo"
+            if media_id and from_number:
+                try:
+                    url = wa_get_media_url(media_id)
+                    path, mime = wa_download_media(url)
+                    print(f"📄 Documento guardado en {path} ({mime})")
+                    wa_send_text(
+                        from_number,
+                        f"📄 Recibí tu documento *{filename}*.\n"
+                        "Puedo revisarlo (si es texto/PDF) o archivarlo. ¿Qué deseas que haga?"
+                    )
+                except Exception as e:
+                    print("Error descargando documento:", e)
+                    wa_send_text(from_number, "No pude descargar el documento. ¿Puedes intentar de nuevo?")
+            return {"status": "ok"}
+
+        # ---------- OTROS TIPOS ----------
         if from_number:
-            wa_send_text(from_number, answer)
-
-        # Siempre 200 OK para Meta
+            wa_send_text(
+                from_number,
+                "Recibí tu mensaje. Por ahora manejo texto, imágenes y documentos. "
+                "Si necesitas algo con audio/video, avísame."
+            )
         return {"status": "ok"}
 
     except Exception as e:
