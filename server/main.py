@@ -160,6 +160,15 @@ def home():
 def health():
     return {"ok": True}
 
+# Diagnóstico rápido de PyPDF2
+@app.get("/check_pypdf2")
+def check_pypdf2():
+    try:
+        import PyPDF2
+        return {"ok": True, "version": getattr(PyPDF2, "__version__", "unknown")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 @app.post("/chat")
 def chat(body: ChatIn):
     q = (body.pregunta or "").strip()
