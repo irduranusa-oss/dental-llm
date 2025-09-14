@@ -71,7 +71,7 @@ def call_openai(question: str) -> str:
         print("OpenAI error:", e)
         raise HTTPException(status_code=500, detail="Error con el modelo")
 
-# ===== Helpers Visión / PDF =====
+# ===== Helpers Visión / PDF / Media =====
 def _mime_from_path(path: str) -> str:
     return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
@@ -82,10 +82,6 @@ def _to_data_url(path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 def analyze_image_with_openai(image_path: str, extra_prompt: str = "") -> str:
-    """
-    Envía la imagen como dataURL a OpenAI visión y devuelve un análisis breve,
-    orientado a odontología si aplica.
-    """
     data_url = _to_data_url(image_path)
     user_msg = [
         {"type": "text", "text": (
@@ -111,16 +107,11 @@ def analyze_image_with_openai(image_path: str, extra_prompt: str = "") -> str:
         return "Recibí tu imagen, pero no pude analizarla en este momento."
 
 def extract_pdf_text(pdf_path: str, max_chars: int = 20000) -> str:
-    """
-    Extrae texto de PDF con PyPDF2 si está disponible.
-    Devuelve texto recortado a max_chars.
-    """
     try:
         import PyPDF2  # requiere PyPDF2==3.0.1 en requirements.txt
     except Exception as e:
         print("PyPDF2 no disponible:", e)
         return ""
-
     try:
         out = []
         with open(pdf_path, "rb") as f:
@@ -149,6 +140,31 @@ def summarize_document_with_openai(raw_text: str) -> str:
         print("Summarize error:", e)
         return ""
 
+def transcribe_audio_with_openai(audio_path: str) -> str:
+    """
+    Transcribe el audio (WhatsApp suele enviar ogg/opus). Si falla con whisper-1,
+    intenta con gpt-4o-mini-transcribe.
+    """
+    try:
+        with open(audio_path, "rb") as f:
+            tr = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+            )
+        return (tr.text or "").strip()
+    except Exception as e1:
+        print("whisper-1 falló, intento gpt-4o-mini-transcribe:", e1)
+        try:
+            with open(audio_path, "rb") as f:
+                tr = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f,
+                )
+            return (tr.text or "").strip()
+        except Exception as e2:
+            print("Transcripción falló:", e2)
+            return ""
+
 # ----------------------------
 # Rutas base
 # ----------------------------
@@ -159,15 +175,6 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True}
-
-# Diagnóstico rápido de PyPDF2
-@app.get("/check_pypdf2")
-def check_pypdf2():
-    try:
-        import PyPDF2
-        return {"ok": True, "version": getattr(PyPDF2, "__version__", "unknown")}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 @app.post("/chat")
 def chat(body: ChatIn):
@@ -247,7 +254,6 @@ def wa_get_media_url(media_id: str) -> str:
     return (r.json() or {}).get("url", "")
 
 def wa_download_media(signed_url: str, dest_prefix: str = "/tmp/wa_media/") -> tuple[str, str]:
-    # Asegura carpeta
     pathlib.Path(dest_prefix).mkdir(parents=True, exist_ok=True)
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     r = requests.get(signed_url, headers=headers, stream=True, timeout=30)
@@ -359,12 +365,36 @@ async def webhook_handler(request: Request):
                         wa_send_text(from_number, "No pude procesar el documento. ¿Puedes intentar de nuevo?")
                 return {"status": "ok"}
 
-            # 4) Otros tipos
+            # 4) Audio / Nota de voz
+            if mtype == "audio":
+                aud = msg.get("audio") or {}
+                media_id = aud.get("id")
+                if media_id and from_number:
+                    try:
+                        url = wa_get_media_url(media_id)
+                        path, mime = wa_download_media(url)
+                        print(f"🎧 Audio guardado en {path} ({mime})")
+                        transcript = transcribe_audio_with_openai(path)
+                        if transcript:
+                            # Usa la transcripción como entrada al LLM
+                            answer = call_openai(
+                                f"Transcripción del audio del usuario:\n\"\"\"{transcript}\"\"\"\n\n"
+                                "Responde de forma útil, breve y enfocada en odontología cuando aplique."
+                            )
+                            wa_send_text(from_number, f"🗣️ *Transcripción*:\n{transcript}\n\n💬 *Respuesta*:\n{answer}")
+                        else:
+                            wa_send_text(from_number, "No pude transcribir el audio. ¿Puedes intentar otra nota de voz?")
+                    except Exception as e:
+                        print("Error audio:", e)
+                        wa_send_text(from_number, "No pude procesar el audio. ¿Puedes intentar de nuevo?")
+                return {"status": "ok"}
+
+            # 5) Otros tipos
             if from_number:
                 wa_send_text(
                     from_number,
-                    "Recibí tu mensaje. Por ahora manejo texto, imágenes y PDFs. "
-                    "Si necesitas algo con audio/video, avísame."
+                    "Recibí tu mensaje. Por ahora manejo texto, imágenes, PDFs y audios (notas de voz). "
+                    "Si necesitas algo con video/ubicación, avísame."
                 )
             return {"status": "ok"}
 
