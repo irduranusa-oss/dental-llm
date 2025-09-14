@@ -1,11 +1,14 @@
-# server/main.py — NochGPT WhatsApp v2.3 (humano tickets + estable)
+# server/main.py — NochGPT WhatsApp v2.6 (tickets humano + /tickets y /handoff)
 # -------------------------------------------------
-# ✅ Background + 200 inmediato a Meta
+# ✅ Procesa en background (200 inmediato a Meta)
 # ✅ De-dup por message_id + rate limit simple
-# ✅ Botones (Cotizar / Tiempos / Humano) + submenú LIST
-# ✅ Texto, imagen, PDF, audio
-# ✅ Tickets "Hablar con humano" (memoria + webhook Google Sheet opcional)
-# ✅ Endpoints de prueba /wa/test_*  + /_debug/health + /tickets
+# ✅ Botones (Cotizar / Tiempos / Humano) + LIST de cotización
+# ✅ Texto, imagen, PDF, audio (Whisper)
+# ✅ Flujo “Hablar con humano” con confirmación
+# ✅ Guarda tickets en memoria y en archivo JSON: /tmp/handoff.json
+# ✅ Endpoints: /tickets  y  /handoff  (mismo contenido)
+# ✅ Endpoints de prueba: /wa/test_template, /wa/test_buttons, /wa/test_list, /wa/send_text
+# ✅ /_debug/health para revisar configuración
 # -------------------------------------------------
 
 from __future__ import annotations
@@ -23,11 +26,11 @@ from server.cache import get_from_cache, save_to_cache
 app = FastAPI(title="Dental-LLM API")
 
 # ----------------------------
-# CORS (en pruebas = "*")  -> luego fija tu dominio Wix
+# CORS (en pruebas = "*")  -> luego fija tu dominio Wix (p.ej. https://www.dentodo.com)
 # ----------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # p.ej. ["https://www.dentodo.com", "https://*.wixsite.com"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,8 +72,8 @@ EMOJI_RE = re.compile(r"[𐀀-􏿿]", flags=re.UNICODE)
 
 def detect_lang(text: str) -> str:
     t = (text or "").lower()
-    # palabras que queremos forzar a ES
-    if re.search(r"\b(precios?|planes?|humano|asesor)\b", t):
+    # fuerza español en palabras clave de tu menú
+    if re.search(r"\b(precios?|planes?|humano|asesor|cotizar|tiempos?)\b", t):
         return "es"
     if re.search(r"[áéíóúñ¿¡]", t):
         return "es"
@@ -84,8 +87,7 @@ def sanitize_text(s: str) -> str:
     if not s:
         return ""
     s = s.replace("\r", " ").replace("\n\n\n", "\n\n")
-    s = EMOJI_RE.sub("", s)  # quita emojis raros
-    s = s.strip()
+    s = EMOJI_RE.sub("", s).strip()
     if len(s) > MAX_USER_CHARS:
         s = s[:MAX_USER_CHARS] + "…"
     return s
@@ -190,7 +192,7 @@ def transcribe_audio_with_openai(audio_path: str) -> str:
             print("Transcripción falló:", e2)
             return ""
 
-# =================== Respuestas rápidas ===================
+# =================== Respuestas rápidas / Menú ===================
 
 def _normalize(s: str) -> str:
     s = (s or "").strip().lower()
@@ -199,47 +201,38 @@ def _normalize(s: str) -> str:
     return s
 
 def reply_for_button(text: str | None = None, btn_id: str | None = None) -> str | None:
-    """
-    Devuelve respuesta fija para botones/menú.
-    - Prioriza ID del botón (confiable).
-    - Luego intenta por texto normalizado.
-    - Si es saludo/ayuda, devuelve "" para enviar el menú.
-    """
     tid = (btn_id or "").strip().lower()
     tnorm = _normalize(text or "")
 
     # Por ID
     if tid in {"btn_cotizar"}:
-        # lo maneja el handler con una LIST; aquí no respondemos fijo
-        return None
+        return None  # el handler envía la LIST
     if tid in {"btn_tiempos"}:
-        return """📅 *Tiempos estándar del laboratorio*
-- Zirconia monolítica (unidad): diseño 24–48 h · sinterizado 6–8 h · entrega 2–3 días hábiles.
-- Carillas e.max: 3–5 días hábiles.
-- PMMA provisionales: 24–48 h.
-- Implante (pilar + corona): según casos · corona def. 2–3 semanas.
-- Urgencias: consultar disponibilidad del día.
-
-¿Qué caso traes?"""
+        return ("📅 *Tiempos estándar del laboratorio*\n"
+                "- Zirconia monolítica (unidad): diseño 24–48 h · sinterizado 6–8 h · entrega 2–3 días hábiles.\n"
+                "- Carillas e.max: 3–5 días hábiles.\n"
+                "- PMMA provisionales: 24–48 h.\n"
+                "- Implante (pilar + corona): según casos · corona def. 2–3 semanas.\n"
+                "- Urgencias: consultar disponibilidad del día.\n\n"
+                "¿Qué caso traes?")
     if tid in {"btn_humano"}:
-        return "__HUMANO__"  # marcador para activar flujo humano
+        return "__HUMANO__"
 
     # Por texto
     if tnorm in {"precios","precio","cotizar","cotizacion"}:
-        return "QUIERO_LIST"  # para disparar la lista de cotización
+        return "QUIERO_LIST"
     if tnorm in {"planes","plan","tiempos","entregas"}:
-        return """📅 *Tiempos estándar del laboratorio*
-- Zirconia monolítica (unidad): diseño 24–48 h · sinterizado 6–8 h · entrega 2–3 días hábiles.
-- Carillas e.max: 3–5 días hábiles.
-- PMMA provisionales: 24–48 h.
-- Implante (pilar + corona): según casos · corona def. 2–3 semanas.
-- Urgencias: consultar disponibilidad del día.
-
-¿Qué caso traes?"""
+        return ("📅 *Tiempos estándar del laboratorio*\n"
+                "- Zirconia monolítica (unidad): diseño 24–48 h · sinterizado 6–8 h · entrega 2–3 días hábiles.\n"
+                "- Carillas e.max: 3–5 días hábiles.\n"
+                "- PMMA provisionales: 24–48 h.\n"
+                "- Implante (pilar + corona): según casos · corona def. 2–3 semanas.\n"
+                "- Urgencias: consultar disponibilidad del día.\n\n"
+                "¿Qué caso traes?")
     if tnorm in {"hablar con humano","humano","asesor","persona"}:
         return "__HUMANO__"
     if tnorm in {"hola","menu","menú","ayuda","start","inicio"}:
-        return ""  # para que el handler envíe el menú
+        return ""  # para enviar el menú
     return None
 
 # =================== WhatsApp API helpers ===================
@@ -278,7 +271,6 @@ def wa_send_text(to_number: str, body: str):
         return {"ok": False, "error": str(e)}
 
 def wa_send_interactive_buttons(to_number: str):
-    """Menú 3 botones: Cotizar / Tiempos / Humano."""
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
         print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
         return {"ok": False, "error": "missing_credentials"}
@@ -308,7 +300,6 @@ def wa_send_interactive_buttons(to_number: str):
         return {"ok": False, "error": str(e)}
 
 def wa_send_list(to_number: str):
-    """Lista (submenú) para Cotizar."""
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
         print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
         return {"ok": False, "error": "missing_credentials"}
@@ -378,7 +369,7 @@ def wa_get_media_url(media_id: str) -> str:
     r.raise_for_status()
     return (r.json() or {}).get("url", "")
 
-def wa_download_media(signed_url: str, dest_prefix: str = MEDIA_DIR) -> tuple[str, str, int]:
+def wa_download_media(signed_url: str, dest_prefix: str = "/tmp/wa_media/") -> tuple[str, str, int]:
     pathlib.Path(dest_prefix).mkdir(parents=True, exist_ok=True)
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     with requests.get(signed_url, headers=headers, stream=True, timeout=30) as r:
@@ -434,7 +425,7 @@ def allow_rate(phone: str) -> bool:
     dq.append(now)
     return True
 
-def cleanup_media(max_age_sec: int = 3600, dir_path: str = MEDIA_DIR):
+def cleanup_media(max_age_sec: int = 3600, dir_path: str = "/tmp/wa_media/"):
     try:
         if not os.path.isdir(dir_path):
             return
@@ -455,8 +446,11 @@ HUMAN_SHEET_WEBHOOK = os.getenv("HUMAN_SHEET_WEBHOOK", "").strip()
 HUMAN_LABEL = os.getenv("HUMAN_LABEL", "NochGPT")
 
 PENDING_HUMAN: dict[str, float] = {}  # from_number -> timestamp esperando datos
-TICKETS: list[dict[str, typing.Any]] = []  # almacenamiento simple en memoria
+
+# Memoria + archivo
+TICKETS: list[dict[str, typing.Any]] = []   # últimos en memoria
 MAX_TICKETS = 200
+HANDOFF_FILE = "/tmp/handoff.json"
 
 HUMAN_PROMPT = (
     "👤 *Te conecto con un asesor humano.*\n"
@@ -469,10 +463,8 @@ HUMAN_PROMPT = (
 )
 
 def parse_human_message(body: str) -> dict[str, str]:
-    """Heurística simple: extrae Nombre / Tema / Contacto / Horario si encuentra patrones."""
     body = body.strip()
     data = {"nombre": "", "tema": "", "contacto": "", "horario": "", "mensaje": body}
-    # patrones tipo "Nombre: xxx"
     for key, regex in {
         "nombre": r"(?i)nombre\s*[:\-]\s*(.+)",
         "tema": r"(?i)tema\s*[:\-]\s*(.+)",
@@ -482,7 +474,6 @@ def parse_human_message(body: str) -> dict[str, str]:
         m = re.search(regex, body)
         if m:
             data[key] = (m.group(len(m.groups())) or "").strip()
-    # si no hay etiquetas, al menos rellena tema con el cuerpo
     if not any([data["nombre"], data["tema"], data["contacto"], data["horario"]]):
         data["tema"] = body
     return data
@@ -491,9 +482,29 @@ def push_ticket(ticket: dict[str, typing.Any]):
     TICKETS.append(ticket)
     if len(TICKETS) > MAX_TICKETS:
         del TICKETS[: len(TICKETS) - MAX_TICKETS]
+    # persiste también en archivo JSON
+    try:
+        arr = []
+        if os.path.exists(HANDOFF_FILE):
+            with open(HANDOFF_FILE, "r", encoding="utf-8") as f:
+                arr = json.load(f)
+        arr.append(ticket)
+        with open(HANDOFF_FILE, "w", encoding="utf-8") as f:
+            json.dump(arr, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("⚠️ No pude guardar en HANDOFF_FILE:", e)
+
+def load_all_tickets() -> list[dict]:
+    # prioridad: archivo; si no existe, memoria
+    if os.path.exists(HANDOFF_FILE):
+        try:
+            with open(HANDOFF_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return list(TICKETS)
 
 def send_ticket_to_sheet(ticket: dict[str, typing.Any]) -> dict[str, typing.Any]:
-    """POST JSON al webhook de Apps Script (si está configurado)."""
     if not HUMAN_SHEET_WEBHOOK:
         return {"ok": False, "reason": "no_webhook_configured"}
     try:
@@ -524,10 +535,14 @@ def debug_health():
     }
     return {"ok": True, "cfg": cfg}
 
+# 👇 Ambos endpoints muestran los tickets guardados
 @app.get("/tickets")
 def list_tickets():
-    """Ver tickets en memoria (últimos primero)."""
-    return list(reversed(TICKETS))
+    return list(reversed(load_all_tickets()))
+
+@app.get("/handoff")
+def list_handoff():
+    return list(reversed(load_all_tickets()))
 
 @app.post("/chat")
 def chat(body: ChatIn):
@@ -603,7 +618,7 @@ async def webhook_handler(request: Request, background: BackgroundTasks):
                 wa_send_text(from_number, "Has enviado muchos mensajes en poco tiempo. Vuelve a intentar en 1 minuto, por favor.")
                 return {"status": "rate_limited"}
 
-            # Procesa en background (devolvemos 200 inmediato a Meta)
+            # Procesa en background (respondemos 200 a Meta)
             background.add_task(handle_incoming_message, msg, from_number)
             return {"status": "queued"}
 
@@ -639,7 +654,6 @@ def handle_incoming_message(msg: dict, from_number: str):
             br = inter.get("button_reply") or {}
             if br:
                 bid = (br.get("id") or "").lower()
-                # Botones principales
                 if bid in {"btn_cotizar"}:
                     wa_send_list(from_number)
                     return
@@ -647,7 +661,6 @@ def handle_incoming_message(msg: dict, from_number: str):
                     wa_send_text(from_number, reply_for_button(btn_id="btn_tiempos") or "")
                     return
                 if bid in {"btn_humano"}:
-                    # activa flujo humano
                     PENDING_HUMAN[from_number] = time.time()
                     wa_send_text(from_number, HUMAN_PROMPT)
                     return
@@ -704,12 +717,9 @@ Dime tu caso y *cuándo* la necesitas. Revisamos disponibilidad del día y te co
                 "mensaje": data.get("mensaje") or body,
             }
             push_ticket(ticket)
-            # intenta enviar a Google Sheet si hay webhook
-            sheet_res = send_ticket_to_sheet(ticket)
+            sheet_res = send_ticket_to_sheet(ticket)  # opcional
             print("📝 TICKET:", ticket, "→ sheet:", sheet_res)
-            # confirma al usuario
             wa_send_text(from_number, "✅ Gracias. Tu solicitud fue registrada y la atiende un asesor. Normalmente respondemos en el mismo día hábil.")
-            # cierra el estado pendiente
             PENDING_HUMAN.pop(from_number, None)
             return
 
@@ -770,7 +780,7 @@ Dime tu caso y *cuándo* la necesitas. Revisamos disponibilidad del día y te co
                         raw = extract_pdf_text(path, max_chars=20000)
                         if raw:
                             summary = summarize_document_with_openai(raw)
-                            wa_send_text(from_number, f"📄 Resumen de *{filename}*:\n{summary}")
+                            wa_send_text(from_number, f"📄 Resumen de *{filename}*: \n{summary}")
                         else:
                             wa_send_text(from_number, "Recibí tu PDF pero no pude leerlo aquí. Agrega *PyPDF2==3.0.1* a requirements.txt y vuelvo a intentarlo.")
                     else:
@@ -806,28 +816,29 @@ Dime tu caso y *cuándo* la necesitas. Revisamos disponibilidad del día y te co
             return
 
         # 5) Otros tipos
-        wa_send_text(from_number, "Recibí tu mensaje. Por ahora manejo texto, imágenes, PDFs y audios (notas de voz). Si necesitas algo con video/ubicación, avísame.")
-    finally:
-        cleanup_media()
+        wa_send_text(
+            from_number,
+            "Recibí tu mensaje. Por ahora manejo *texto*, *imágenes*, *PDFs* y *audios*. Si necesitas algo con video/ubicación, avísame."
+        )
+        return
 
-# =================== Endpoints de PRUEBA ===================
+    except Exception as e:
+        print("❌ Error handle_incoming_message:", e)
+
+# =================== Endpoints de prueba ===================
 
 @app.get("/wa/test_template")
 def wa_test_template(to: str, template: str = "nochgpt", lang: str = "es_MX"):
-    res = wa_send_template(to_number=to, template_name=template, lang_code=lang)
-    return JSONResponse(res)
+    return JSONResponse(wa_send_template(to_number=to, template_name=template, lang_code=lang))
 
 @app.get("/wa/test_buttons")
 def wa_test_buttons(to: str):
-    res = wa_send_interactive_buttons(to)
-    return JSONResponse(res)
+    return JSONResponse(wa_send_interactive_buttons(to))
 
 @app.get("/wa/test_list")
 def wa_test_list(to: str):
-    res = wa_send_list(to)
-    return JSONResponse(res)
+    return JSONResponse(wa_send_list(to))
 
 @app.get("/wa/send_text")
-def wa_send_text_ep(to: str, body: str = "Hola desde NochGPT"):
-    res = wa_send_text(to, body)
-    return JSONResponse(res)
+def wa_send_text_ep(to: str, body: str):
+    return JSONResponse(wa_send_text(to, body))
