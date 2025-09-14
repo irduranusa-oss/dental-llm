@@ -180,13 +180,13 @@ async def verify_webhook(request: Request):
 
     return PlainTextResponse(content="token invalido", status_code=403)
 
+
 # --- RECEPCIÓN DE MENSAJES (POST) ---
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     data = await request.json()
     print("📩 Payload recibido:", data)
 
-    # Algunas notificaciones no traen "messages" (p. ej. statuses)
     try:
         entry = data.get("entry", [])[0]
         changes = entry.get("changes", [])[0]
@@ -200,7 +200,6 @@ async def webhook_handler(request: Request):
         from_number = msg.get("from")
         mtype = msg.get("type")
 
-        # Texto recibido
         if mtype == "text":
             user_text = msg.get("text", {}).get("body", "").strip()
         elif mtype == "button":
@@ -208,7 +207,6 @@ async def webhook_handler(request: Request):
         else:
             user_text = "(mensaje recibido)"
 
-        # Llama a tu LLM y responde por WhatsApp
         try:
             answer = call_openai(user_text) if user_text else "Hola 👋"
         except Exception:
@@ -219,8 +217,5 @@ async def webhook_handler(request: Request):
     except Exception as e:
         print("❌ Error en webhook:", e)
 
-    # Responder 200 OK SIEMPRE
+    # 200 OK SIEMPRE
     return {"status": "ok"}
-
-
-    return JSONResponse({"status": "ok"})
