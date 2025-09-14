@@ -12,25 +12,28 @@ from server.cache import get_from_cache, save_to_cache
 
 app = FastAPI(title="Dental-LLM API")
 
-# --- CORS (mientras pruebas, "*"; luego pon tu dominio de Wix) ---
+# ----------------------------
+# CORS (en pruebas = "*")
+# Luego fija tu dominio (p. ej. "https://www.dentodo.com")
+# ----------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # ejemplo: ["https://www.dentodo.com"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- OpenAI client ---
+# ----------------------------
+# OpenAI client
+# ----------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     print("⚠️ Falta OPENAI_API_KEY en variables de entorno")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- Modelo (rápido y económico) ---
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# --- Prompt dental (siempre responder en el mismo idioma del usuario) ---
 SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
 - Focus on dental topics (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
 - Be concise, practical, and provide ranges (e.g., temperatures or times) when relevant.
@@ -38,18 +41,17 @@ SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
 - IMPORTANT: Always reply in the same language as the user's question.
 """
 
-# --- Entrada para /chat ---
 class ChatIn(BaseModel):
     pregunta: str
 
-# --- Historial simple en memoria (opcional) ---
+# Historial simple en memoria
 HIST = []      # cada item: {"t": timestamp, "pregunta": ..., "respuesta": ...}
 MAX_HIST = 200
 
 def detect_lang(text: str) -> str:
     """
-    Heurística simple para la LLAVE de la cache.
-    La respuesta final la controla el SYSTEM_PROMPT (mismo idioma del usuario).
+    Heurística SOLO para la llave de la cache.
+    El idioma final lo fuerza el SYSTEM_PROMPT.
     """
     t = text.lower()
     if re.search(r"[áéíóúñ¿¡]", t):
@@ -76,7 +78,9 @@ def call_openai(question: str) -> str:
         print("OpenAI error:", e)
         raise HTTPException(status_code=500, detail="Error con el modelo")
 
-# --- Rutas base ---
+# ----------------------------
+# Rutas base
+# ----------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return "<h3>Dental-LLM corriendo ✅</h3>"
@@ -91,7 +95,7 @@ def chat(body: ChatIn):
     if not q:
         raise HTTPException(status_code=400, detail="Falta 'pregunta'")
 
-    # 1) Idioma solo para la LLAVE de cache
+    # 1) Idioma solo para cache
     lang = detect_lang(q)
 
     # 2) Intentar cache
@@ -110,7 +114,7 @@ def chat(body: ChatIn):
 
     return {"respuesta": a, "cached": False}
 
-# Compatibilidad: /chat_multi sigue funcionando igual
+# Compatibilidad
 @app.post("/chat_multi")
 def chat_multi(body: ChatIn):
     return chat(body)
@@ -152,9 +156,9 @@ def wa_send_text(to_number: str, body: str):
         "messaging_product": "whatsapp",
         "to": to_number,
         "type": "text",
-        "text": {"body": body},
+        "text": {"body": body[:3900]},  # margen < 4096 chars
     }
-    r = requests.post(WA_BASE, headers=headers, json=data)
+    r = requests.post(WA_BASE, headers=headers, json=data, timeout=15)
     try:
         return r.json()
     except Exception:
@@ -162,13 +166,19 @@ def wa_send_text(to_number: str, body: str):
 
 # --- VERIFICACIÓN (GET) ---
 @app.get("/webhook")
-async def verify(request: Request):
+async def verify_webhook(request: Request):
+    # Meta envía: hub.mode, hub.verify_token, hub.challenge
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-    if mode == "subscribe" and token == META_VERIFY_TOKEN:
-        return PlainTextResponse(challenge)
-    return PlainTextResponse("Error de verificación", status_code=403)
+
+    print("WEBHOOK VERIFY =>", {"mode": mode, "token": token, "challenge": challenge})
+
+    # Debe devolver EXACTAMENTE el challenge en texto plano (200)
+    if mode == "subscribe" and token == META_VERIFY_TOKEN and challenge:
+        return PlainTextResponse(content=challenge, status_code=200)
+
+    return PlainTextResponse(content="token invalido", status_code=403)
 
 # --- RECEPCIÓN DE MENSAJES (POST) ---
 @app.post("/webhook")
@@ -176,32 +186,41 @@ async def webhook_handler(request: Request):
     data = await request.json()
     print("📩 Payload recibido:", data)
 
-    # A veces llegan notificaciones sin 'messages' (por estados, etc.)
+    # Algunas notificaciones no traen "messages" (p. ej. statuses)
     try:
-        changes = data.get("entry", [])[0].get("changes", [])[0].get("value", {})
-        if "messages" not in changes:
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        msgs = value.get("messages", [])
+
+        if not msgs:
             return {"status": "no_message"}
 
-        message = changes["messages"][0]
-        from_number = message.get("from")
-        text_body = ""
-        # texto normal
-        if message.get("type") == "text":
-            text_body = message["text"].get("body", "")
-        # otros tipos (opcional)
-        elif message.get("type") == "button":
-            text_body = message["button"].get("text", "")
-        else:
-            text_body = "(mensaje recibido)"
+        msg = msgs[0]
+        from_number = msg.get("from")
+        mtype = msg.get("type")
 
-        # Respuesta automática simple
-        reply = f"👋 Hola! Recibí tu mensaje: {text_body}"
-        wa_send_text(from_number, reply)
+        # Texto recibido
+        if mtype == "text":
+            user_text = msg.get("text", {}).get("body", "").strip()
+        elif mtype == "button":
+            user_text = msg.get("button", {}).get("text", "").strip()
+        else:
+            user_text = "(mensaje recibido)"
+
+        # Llama a tu LLM y responde por WhatsApp
+        try:
+            answer = call_openai(user_text) if user_text else "Hola 👋"
+        except Exception:
+            answer = "Lo siento, tuve un problema procesando tu mensaje."
+
+        wa_send_text(from_number, answer)
 
     except Exception as e:
         print("❌ Error en webhook:", e)
 
-    # IMPORTANTE: responder 200/OK a Meta
+    # Responder 200 OK SIEMPRE
     return {"status": "ok"}
+
 
     return JSONResponse({"status": "ok"})
