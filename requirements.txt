@@ -4,3 +4,4 @@ requests
 python-multipart
 openai
 google-genai==1.6.0
+PyPDF2==3.0.1
