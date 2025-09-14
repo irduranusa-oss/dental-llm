@@ -1,10 +1,10 @@
 # server/main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 from openai import OpenAI
-import os, time, re
+import os, time, re, requests
 
 # --- IMPORTA LA CAJITA (cache en memoria) ---
 # Nota: requiere server/__init__.py para import absoluto
@@ -76,10 +76,14 @@ def call_openai(question: str) -> str:
         print("OpenAI error:", e)
         raise HTTPException(status_code=500, detail="Error con el modelo")
 
-# --- Rutas ---
+# --- Rutas base ---
 @app.get("/", response_class=HTMLResponse)
 def home():
     return "<h3>Dental-LLM corriendo ✅</h3>"
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 @app.post("/chat")
 def chat(body: ChatIn):
@@ -124,31 +128,39 @@ def history(q: str = "", limit: int = 10):
             break
     return list(reversed(out))
 
-# --- WHATSAPP WEBHOOK & REPLY ---
-import os, requests
-from fastapi import Request
-from fastapi.responses import PlainTextResponse, JSONResponse
+# =========================
+#    WHATSAPP WEBHOOK
+# =========================
 
-WHATSAPP_TOKEN   = os.environ.get("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
-META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "")
+WHATSAPP_TOKEN    = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
 
 WA_BASE = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
 
 def wa_send_text(to_number: str, body: str):
+    """Envía texto por la Cloud API."""
+    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
+        print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
+        return {"error": "missing_credentials"}
+
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     data = {
         "messaging_product": "whatsapp",
         "to": to_number,
         "type": "text",
-        "text": {"body": body}
+        "text": {"body": body},
     }
-    return requests.post(WA_BASE, headers=headers, json=data).json()
+    r = requests.post(WA_BASE, headers=headers, json=data)
+    try:
+        return r.json()
+    except Exception:
+        return {"status_code": r.status_code, "text": r.text}
 
-# --- VERIFICACIÓN DE WEBHOOK ---
+# --- VERIFICACIÓN (GET) ---
 @app.get("/webhook")
 async def verify(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -158,19 +170,38 @@ async def verify(request: Request):
         return PlainTextResponse(challenge)
     return PlainTextResponse("Error de verificación", status_code=403)
 
-# --- RECEPCIÓN DE MENSAJES ---
+# --- RECEPCIÓN DE MENSAJES (POST) ---
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     data = await request.json()
+    print("📩 Payload recibido:", data)
+
+    # A veces llegan notificaciones sin 'messages' (por estados, etc.)
     try:
-        entry = data["entry"][0]["changes"][0]["value"]["messages"][0]
-        from_number = entry["from"]
-        text = entry["text"]["body"]
-        
-        # Responder automáticamente
-        respuesta = f"👋 Hola! Recibí tu mensaje: {text}"
-        wa_send_text(from_number, respuesta)
+        changes = data.get("entry", [])[0].get("changes", [])[0].get("value", {})
+        if "messages" not in changes:
+            return {"status": "no_message"}
+
+        message = changes["messages"][0]
+        from_number = message.get("from")
+        text_body = ""
+        # texto normal
+        if message.get("type") == "text":
+            text_body = message["text"].get("body", "")
+        # otros tipos (opcional)
+        elif message.get("type") == "button":
+            text_body = message["button"].get("text", "")
+        else:
+            text_body = "(mensaje recibido)"
+
+        # Respuesta automática simple
+        reply = f"👋 Hola! Recibí tu mensaje: {text_body}"
+        wa_send_text(from_number, reply)
 
     except Exception as e:
-        print("Error en webhook:", e)
+        print("❌ Error en webhook:", e)
+
+    # IMPORTANTE: responder 200/OK a Meta
+    return {"status": "ok"}
+
     return JSONResponse({"status": "ok"})
