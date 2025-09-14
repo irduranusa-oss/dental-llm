@@ -123,3 +123,54 @@ def history(q: str = "", limit: int = 10):
         if len(out) >= max(1, min(limit, 50)):
             break
     return list(reversed(out))
+
+# --- WHATSAPP WEBHOOK & REPLY ---
+import os, requests
+from fastapi import Request
+from fastapi.responses import PlainTextResponse, JSONResponse
+
+WHATSAPP_TOKEN   = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "")
+
+WA_BASE = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
+
+def wa_send_text(to_number: str, body: str):
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": body}
+    }
+    return requests.post(WA_BASE, headers=headers, json=data).json()
+
+# --- VERIFICACIÓN DE WEBHOOK ---
+@app.get("/webhook")
+async def verify(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == META_VERIFY_TOKEN:
+        return PlainTextResponse(challenge)
+    return PlainTextResponse("Error de verificación", status_code=403)
+
+# --- RECEPCIÓN DE MENSAJES ---
+@app.post("/webhook")
+async def webhook_handler(request: Request):
+    data = await request.json()
+    try:
+        entry = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        from_number = entry["from"]
+        text = entry["text"]["body"]
+        
+        # Responder automáticamente
+        respuesta = f"👋 Hola! Recibí tu mensaje: {text}"
+        wa_send_text(from_number, respuesta)
+
+    except Exception as e:
+        print("Error en webhook:", e)
+    return JSONResponse({"status": "ok"})
