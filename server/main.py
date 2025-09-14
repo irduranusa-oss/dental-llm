@@ -69,7 +69,6 @@ def call_openai(question: str, lang_hint: str | None = None) -> str:
     Llama al modelo con el system prompt dental.
     lang_hint: 'es' | 'en' | 'pt' | 'fr' -> fuerza explícitamente el idioma de salida.
     """
-    # Construye un system prompt con pista explícita de idioma (además del SYSTEM_PROMPT).
     sys = SYSTEM_PROMPT
     if lang_hint in LANG_NAME:
         sys += f"\n- The user's language is {LANG_NAME[lang_hint]}. Always reply in {LANG_NAME[lang_hint]}."
@@ -264,6 +263,59 @@ def wa_send_text(to_number: str, body: str):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+# =========================================================
+#  Envío de PLANTILLAS (HSM) y endpoint de prueba
+# =========================================================
+
+def wa_send_template(to_number: str, template_name: str, lang_code: str = "es_MX", components: list | None = None):
+    """
+    Envía un mensaje de PLANTILLA (HSM).
+    - to_number: número E.164 SIN '+', solo dígitos (ej. 16232310578, 52155XXXXXXX)
+    - template_name: nombre exacto de la plantilla (ej. "nochgpt")
+    - lang_code: código de idioma de la plantilla (ej. "es_MX")
+    - components: lista opcional con componentes (body params, botones con parámetros, etc.)
+    """
+    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
+        print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
+        return {"ok": False, "error": "missing_credentials"}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _e164_no_plus(to_number),
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": lang_code}
+        }
+    }
+    if components:
+        payload["template"]["components"] = components
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        url = f"{FB_API}/{WHATSAPP_PHONE_ID}/messages"
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw": r.text}
+        return {"ok": r.ok, "status": r.status_code, "resp": j}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# Endpoint de PRUEBA para disparar una plantilla aprobada desde /docs
+@app.get("/wa/test_template")
+def wa_test_template(to: str, template: str = "nochgpt", lang: str = "es_MX"):
+    """
+    Dispara una plantilla aprobada.
+    - to: número destino (solo dígitos, sin '+')
+    - template: nombre exacto (ej. 'nochgpt')
+    - lang: código de idioma (ej. 'es_MX')
+    """
+    res = wa_send_template(to_number=to, template_name=template, lang_code=lang)
+    return JSONResponse(res)
+
 def wa_get_media_url(media_id: str) -> str:
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     r = requests.get(f"{FB_API}/{media_id}", headers=headers, timeout=15)
@@ -317,7 +369,7 @@ async def webhook_handler(request: Request):
             from_number = msg.get("from")
             mtype       = msg.get("type")
 
-            # 1) Texto / botón (forzamos idioma del propio texto)
+            # 1) Texto / botón
             if mtype == "text":
                 user_text = (msg.get("text") or {}).get("body", "").strip()
             elif mtype == "button":
@@ -383,7 +435,7 @@ async def webhook_handler(request: Request):
                         wa_send_text(from_number, "No pude procesar el documento. ¿Puedes intentar de nuevo?")
                 return {"status": "ok"}
 
-            # 4) Audio / Nota de voz (detecta idioma de la transcripción y responde igual)
+            # 4) Audio / Nota de voz
             if mtype == "audio":
                 aud = msg.get("audio") or {}
                 media_id = aud.get("id")
@@ -420,7 +472,7 @@ async def webhook_handler(request: Request):
                 )
             return {"status": "ok"}
 
-        # B) Status (entregado/leído, etc.) — responder 200 OK
+        # B) Status (entregado/leído, etc.)
         if value.get("statuses"):
             return {"status": "status_ok"}
 
