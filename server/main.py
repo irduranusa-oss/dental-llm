@@ -42,6 +42,14 @@ SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
 - IMPORTANT: Always reply in the same language as the user's question.
 """
 
+# ---- Mapeo de códigos a nombres (para la pista de idioma) ----
+LANG_NAME = {
+    "es": "Spanish",
+    "en": "English",
+    "pt": "Portuguese",
+    "fr": "French",
+}
+
 class ChatIn(BaseModel):
     pregunta: str
 
@@ -50,18 +58,27 @@ HIST = []      # cada item: {"t": timestamp, "pregunta": ..., "respuesta": ...}
 MAX_HIST = 200
 
 def detect_lang(text: str) -> str:
-    t = text.lower()
+    t = (text or "").lower()
     if re.search(r"[áéíóúñ¿¡]", t): return "es"
     if re.search(r"[ãõáéíóúç]", t): return "pt"
     if re.search(r"[àâçéèêëîïôùûüÿœ]", t): return "fr"
     return "en"
 
-def call_openai(question: str) -> str:
+def call_openai(question: str, lang_hint: str | None = None) -> str:
+    """
+    Llama al modelo con el system prompt dental.
+    lang_hint: 'es' | 'en' | 'pt' | 'fr' -> fuerza explícitamente el idioma de salida.
+    """
+    # Construye un system prompt con pista explícita de idioma (además del SYSTEM_PROMPT).
+    sys = SYSTEM_PROMPT
+    if lang_hint in LANG_NAME:
+        sys += f"\n- The user's language is {LANG_NAME[lang_hint]}. Always reply in {LANG_NAME[lang_hint]}."
+
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": sys},
                 {"role": "user",   "content": question},
             ],
             temperature=OPENAI_TEMP,
@@ -135,7 +152,7 @@ def summarize_document_with_openai(raw_text: str) -> str:
         "Incluye puntos clave, medidas/valores si existen y recomendaciones:\n\n" + raw_text
     )
     try:
-        return call_openai(prompt)
+        return call_openai(prompt, detect_lang(raw_text))
     except Exception as e:
         print("Summarize error:", e)
         return ""
@@ -185,7 +202,7 @@ def chat(body: ChatIn):
     cached = get_from_cache(q, lang)
     if cached is not None:
         return {"respuesta": cached, "cached": True}
-    a = call_openai(q)
+    a = call_openai(q, lang_hint=lang)
     save_to_cache(q, lang, a)
     HIST.append({"t": time.time(), "pregunta": q, "respuesta": a})
     if len(HIST) > MAX_HIST:
@@ -300,7 +317,7 @@ async def webhook_handler(request: Request):
             from_number = msg.get("from")
             mtype       = msg.get("type")
 
-            # 1) Texto / botón
+            # 1) Texto / botón (forzamos idioma del propio texto)
             if mtype == "text":
                 user_text = (msg.get("text") or {}).get("body", "").strip()
             elif mtype == "button":
@@ -310,7 +327,8 @@ async def webhook_handler(request: Request):
 
             if user_text:
                 try:
-                    answer = call_openai(user_text)
+                    lang = detect_lang(user_text)
+                    answer = call_openai(user_text, lang_hint=lang)
                 except Exception:
                     answer = "Lo siento, tuve un problema procesando tu mensaje."
                 if from_number:
@@ -365,7 +383,7 @@ async def webhook_handler(request: Request):
                         wa_send_text(from_number, "No pude procesar el documento. ¿Puedes intentar de nuevo?")
                 return {"status": "ok"}
 
-            # 4) Audio / Nota de voz
+            # 4) Audio / Nota de voz (detecta idioma de la transcripción y responde igual)
             if mtype == "audio":
                 aud = msg.get("audio") or {}
                 media_id = aud.get("id")
@@ -376,12 +394,16 @@ async def webhook_handler(request: Request):
                         print(f"🎧 Audio guardado en {path} ({mime})")
                         transcript = transcribe_audio_with_openai(path)
                         if transcript:
-                            # Usa la transcripción como entrada al LLM
+                            lang = detect_lang(transcript)
                             answer = call_openai(
                                 f"Transcripción del audio del usuario:\n\"\"\"{transcript}\"\"\"\n\n"
-                                "Responde de forma útil, breve y enfocada en odontología cuando aplique."
+                                "Responde de forma útil, breve y enfocada en odontología cuando aplique.",
+                                lang_hint=lang,
                             )
-                            wa_send_text(from_number, f"🗣️ *Transcripción*:\n{transcript}\n\n💬 *Respuesta*:\n{answer}")
+                            wa_send_text(
+                                from_number,
+                                f"🗣️ *Transcripción*:\n{transcript}\n\n💬 *Respuesta*:\n{answer}"
+                            )
                         else:
                             wa_send_text(from_number, "No pude transcribir el audio. ¿Puedes intentar otra nota de voz?")
                     except Exception as e:
