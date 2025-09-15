@@ -1,88 +1,50 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
-from pydantic import BaseModel
-from openai import OpenAI
-import os, time, re, requests, mimetypes, base64, pathlib
-
-# --- IMPORTA LA CAJITA (cache en memoria) ---
-from server.cache import get_from_cache, save_to_cache
-
-app = FastAPI(title="Dental-LLM API")
-
-# ----------------------------
-# CORS (en pruebas = "*")
-# ----------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ----------------------------
-# OpenAI client
-# ----------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-if not OPENAI_API_KEY:
-    print("⚠️ Falta OPENAI_API_KEY en variables de entorno")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_TEMP = float(os.getenv("OPENAI_TEMP", "0.2"))
-
-SYSTEM_PROMPT = """You are NochGPT, a helpful dental laboratory assistant.
-- Focus on dental topics (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
-- Be concise, practical, and provide ranges (e.g., temperatures or times) when relevant.
-- If the question is not dental-related, politely say you are focused on dental topics and offer a helpful redirection.
-- IMPORTANT: Always reply in the same language as the user's question.
-"""
-
-# ----------------------------
-# Configuración Google Sheets
-# ----------------------------
-SHEETS_WEBHOOK_URL = os.getenv("SHEETS_WEBHOOK_URL", "").strip()
-
-def send_ticket_to_sheets(data: dict):
-    if not SHEETS_WEBHOOK_URL:
-        print("⚠️ Falta SHEETS_WEBHOOK_URL (no se envió ticket)")
-        return {"ok": False, "error": "missing_webhook"}
-    try:
-        r = requests.post(SHEETS_WEBHOOK_URL, json=data, timeout=10)
-        ok = r.status_code == 200
-        print(f"📨 Ticket a Sheets -> status={r.status_code} ok={ok} resp={r.text[:200]}")
-        return {"ok": ok, "status": r.status_code, "resp": r.text}
-    except Exception as e:
-        print("❌ Error enviando ticket a Sheets:", e)
-        return {"ok": False, "error": str(e)}
-
-# ----------------------------
-# Utilidades
-# ----------------------------
-LANG_NAME = {"es": "Spanish","en": "English","pt": "Portuguese","fr": "French"}
-
-class ChatIn(BaseModel):
-    pregunta: str
-
-HIST = []
-MAX_HIST = 200
+# ========= Idiomas =========
+LANG_NAME = {"es": "Spanish", "en": "English", "pt": "Portuguese", "fr": "French"}
 
 def detect_lang(text: str) -> str:
-    t = (text or "").lower()
-    if re.search(r"[áéíóúñ¿¡]", t): return "es"
-    if re.search(r"[ãõáéíóúç]", t): return "pt"
-    if re.search(r"[àâçéèêëîïôùûüÿœ]", t): return "fr"
-    return "en"
+    """
+    Heurística rápida y robusta para ES/EN/PT/FR.
+    - Acentos/¿¡ => ES
+    - Tildes/ç portuguesas => PT
+    - Diacríticos FR => FR
+    - Si no, palabras muy frecuentes para resolver empates.
+    """
+    t = (text or "").strip().lower()
 
-def call_openai(question: str, lang_hint: str|None=None) -> str:
+    # Señales fuertes
+    if re.search(r"[áéíóúñ¿¡]", t):
+        return "es"
+    if re.search(r"[ãõáéíóúç]", t):
+        return "pt"
+    if re.search(r"[àâçéèêëîïôùûüÿœ]", t):
+        return "fr"
+
+    # Palabras frecuentes
+    es_hits = len(re.findall(r"\b(el|la|de|que|y|para|con|qué|cómo|cuál|dónde)\b", t))
+    en_hits = len(re.findall(r"\b(the|and|for|what|how|where|with|you|your)\b", t))
+    pt_hits = len(re.findall(r"\b(o|a|de|que|e|para|com|você|seu)\b", t))
+    fr_hits = len(re.findall(r"\b(le|la|de|et|pour|avec|vous|votre|quoi|comment)\b", t))
+
+    scores = {"es": es_hits, "en": en_hits, "pt": pt_hits, "fr": fr_hits}
+    # Si hay empate, preferimos EN como fallback
+    return max(scores, key=lambda k: (scores[k], 1 if k == "en" else 0)) or "en"
+
+def call_openai(question: str, lang_hint: str | None = None) -> str:
+    """
+    Llama al modelo con system prompt e INSTRUCCIÓN DURA de idioma.
+    """
     sys = SYSTEM_PROMPT
     if lang_hint in LANG_NAME:
-        sys += f"\n- The user's language is {LANG_NAME[lang_hint]}. Always reply in {LANG_NAME[lang_hint]}."
+        # Instrucción explícita y contundente para evitar respuestas en inglés.
+        sys += f"\nResponde SIEMPRE en {LANG_NAME[lang_hint]}. Si el usuario cambia de idioma, adapta la respuesta al nuevo idioma."
+
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
-            messages=[{"role":"system","content":sys},{"role":"user","content":question}],
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": question},
+            ],
             temperature=OPENAI_TEMP,
         )
         return (resp.choices[0].message.content or "").strip()
@@ -90,107 +52,128 @@ def call_openai(question: str, lang_hint: str|None=None) -> str:
         print("OpenAI error:", e)
         raise HTTPException(status_code=500, detail="Error con el modelo")
 
-def transcribe_audio_with_openai(audio_path: str) -> str:
+# ========= Tickets a Google Sheet =========
+SHEETS_WEBHOOK_URL = os.getenv("SHEET_WEBHOOK", "") or os.getenv("SHEETS_WEBHOOK_URL", "")
+
+def send_ticket(numero: str, mensaje: str, respuesta: str, etiqueta: str = "NochGPT"):
+    """
+    Envía un ticket simple al Apps Script (si está configurado).
+    El Apps Script actual espera: fecha, numero, mensaje, respuesta, etiqueta.
+    """
+    if not SHEETS_WEBHOOK_URL:
+        print("Falta SHEETS_WEBHOOK_URL (no se envía ticket)")
+        return
+
+    payload = {
+        "fecha": datetime.utcnow().isoformat(timespec="seconds"),
+        "numero": str(numero or ""),
+        "mensaje": mensaje or "",
+        "respuesta": respuesta or "",
+        "etiqueta": etiqueta or "NochGPT",
+    }
     try:
-        with open(audio_path,"rb") as f:
-            tr = client.audio.transcriptions.create(model="whisper-1",file=f)
-        return (tr.text or "").strip()
-    except Exception as e1:
-        print("whisper-1 falló:", e1)
-        return ""
-
-# ----------------------------
-# Rutas base
-# ----------------------------
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return "<h3>Dental-LLM corriendo ✅</h3>"
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.post("/chat")
-def chat(body: ChatIn):
-    q = (body.pregunta or "").strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="Falta 'pregunta'")
-    lang = detect_lang(q)
-    cached = get_from_cache(q, lang)
-    if cached is not None:
-        return {"respuesta": cached, "cached": True}
-    a = call_openai(q, lang_hint=lang)
-    save_to_cache(q, lang, a)
-    HIST.append({"t": time.time(), "pregunta": q, "respuesta": a})
-    if len(HIST) > MAX_HIST: del HIST[:len(HIST)-MAX_HIST]
-    return {"respuesta": a, "cached": False}
-
-# ======================================================================
-# WHATSAPP WEBHOOK
-# ======================================================================
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "nochgpt-verify-123")
-FB_API = "https://graph.facebook.com/v20.0"
-
-def _e164_no_plus(num: str) -> str:
-    num = (num or "").strip().replace(" ","").replace("-","")
-    return num[1:] if num.startswith("+") else num
-
-def _wa_base_url() -> str:
-    return f"{FB_API}/{WHATSAPP_PHONE_ID}/messages"
-
-def wa_send_text(to_number: str, body: str):
-    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID):
-        print("⚠️ Falta WHATSAPP_TOKEN o WHATSAPP_PHONE_ID")
-        return {"ok": False, "error": "missing_credentials"}
-    headers = {"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    data = {"messaging_product":"whatsapp","to":_e164_no_plus(to_number),"type":"text","text":{"preview_url":False,"body":body[:3900]}}
-    try:
-        r = requests.post(_wa_base_url(),headers=headers,json=data,timeout=20)
-        j = r.json() if r.headers.get("content-type","").startswith("application/json") else {"raw":r.text}
-        return {"ok":r.ok,"status":r.status_code,"resp":j}
+        r = requests.post(SHEETS_WEBHOOK_URL, json=payload, timeout=15)
+        ok = (r.status_code // 100) == 2
+        print("Ticket sheet =>", r.status_code, r.text[:200])
+        return ok
     except Exception as e:
-        return {"ok":False,"error":str(e)}
+        print("Ticket error:", e)
+        return False
 
-# --- VERIFICACIÓN (GET) ---
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    mode=request.query_params.get("hub.mode","")
-    token=request.query_params.get("hub.verify_token","")
-    challenge=request.query_params.get("hub.challenge","")
-    if mode=="subscribe" and token==META_VERIFY_TOKEN and challenge:
-        return PlainTextResponse(content=challenge,status_code=200)
-    return PlainTextResponse(content="forbidden",status_code=403)
-
-# --- RECEPCIÓN DE MENSAJES (POST) ---
+# ========= Webhook WhatsApp =========
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    try: data=await request.json()
-    except Exception: return JSONResponse({"received":False,"error":"invalid_json"})
-    print("📩 Payload recibido:",data)
     try:
-        entry=(data.get("entry") or [{}])[0]
-        changes=(entry.get("changes") or [{}])[0]
-        value=changes.get("value") or {}
-        msgs=value.get("messages") or []
-        if msgs:
-            msg=msgs[0]; from_number=msg.get("from"); mtype=msg.get("type")
-            user_text=""
-            if mtype=="text": user_text=(msg.get("text") or {}).get("body","").strip()
-            if mtype=="audio":
-                aud=msg.get("audio") or {}; media_id=aud.get("id")
-                if media_id and from_number:
-                    # (ejemplo simplificado, descarga de audio no implementada aquí)
-                    wa_send_text(from_number,"🎧 Recibí tu audio. Transcripción no implementada aquí.")
-            if user_text:
-                lang=detect_lang(user_text)
-                answer=call_openai(user_text,lang_hint=lang)
-                wa_send_text(from_number,answer)
-                ticket={"fecha":time.strftime("%Y-%m-%d %H:%M:%S"),"numero":from_number,"mensaje":user_text,"respuesta":answer,"etiqueta":"NochGPT"}
-                send_ticket_to_sheets(ticket)
-                return {"status":"ok"}
-        return {"status":"no_message"}
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"received": False, "error": "invalid_json"})
+
+    print("📩 Payload recibido:", data)
+
+    try:
+        entry = (data.get("entry") or [{}])[0]
+        changes = (entry.get("changes") or [{}])[0]
+        value = changes.get("value") or {}
+
+        # A) Mensajes nuevos
+        msgs = value.get("messages") or []
+        if not msgs:
+            # B) Status u otros
+            if value.get("statuses"):
+                return {"status": "status_ok"}
+            return {"status": "no_message"}
+
+        msg = msgs[0]
+        from_number = msg.get("from")
+        mtype = msg.get("type")
+
+        # ---- TEXTO ----
+        if mtype == "text":
+            user_text = (msg.get("text") or {}).get("body", "").strip()
+            if not user_text:
+                return {"status": "ok"}
+
+            lang = detect_lang(user_text)
+            try:
+                answer = call_openai(user_text, lang_hint=lang)
+            except Exception:
+                # fallback mínimamente en el mismo idioma
+                answer = "Lo siento, tuve un problema procesando tu mensaje." if lang == "es" else \
+                         "Desculpe, tive um problema ao processar sua mensagem." if lang == "pt" else \
+                         "Désolé, j'ai eu un problème en traitant votre message." if lang == "fr" else \
+                         "Sorry, I had trouble processing your message."
+
+            if from_number:
+                wa_send_text(from_number, answer)
+                # Ticket
+                send_ticket(from_number, user_text, answer)
+
+            return {"status": "ok"}
+
+        # ---- AUDIO (nota de voz) ----
+        if mtype == "audio":
+            aud = msg.get("audio") or {}
+            media_id = aud.get("id")
+            if media_id and from_number:
+                try:
+                    url = wa_get_media_url(media_id)
+                    path, mime = wa_download_media(url)
+                    print(f"🎧 Audio guardado en {path} ({mime})")
+
+                    transcript = transcribe_audio_with_openai(path)
+                    if transcript:
+                        lang = detect_lang(transcript)
+                        answer = call_openai(
+                            f"Transcripción del audio del usuario:\n\"\"\"{transcript}\"\"\"\n\n"
+                            "Responde de forma útil, breve y enfocada en odontología cuando aplique.",
+                            lang_hint=lang,
+                        )
+                        wa_send_text(from_number, f"🗣️ *Transcripción*:\n{transcript}\n\n💬 *Respuesta*:\n{answer}")
+                        # Ticket
+                        send_ticket(from_number, f"[AUDIO] {transcript}", answer)
+                    else:
+                        msg_txt = "No pude transcribir el audio. ¿Puedes intentar otra nota de voz?"
+                        wa_send_text(from_number, msg_txt)
+                        send_ticket(from_number, "[AUDIO] (sin transcripción)", msg_txt)
+
+                except Exception as e:
+                    print("Error audio:", e)
+                    msg_txt = "No pude procesar el audio. ¿Puedes intentar de nuevo?"
+                    wa_send_text(from_number, msg_txt)
+                    send_ticket(from_number, "[AUDIO] error", msg_txt)
+
+            return {"status": "ok"}
+
+        # ---- Otros tipos (opcionalmente ignoramos) ----
+        if from_number:
+            wa_send_text(
+                from_number,
+                "Recibí tu mensaje. Por ahora manejo *texto* y *notas de voz*."
+            )
+            send_ticket(from_number, "[OTRO TIPO]", "Mensaje no soportado (solo texto y audio).")
+
+        return {"status": "ok"}
+
     except Exception as e:
-        print("❌ Error en webhook:",e)
-        return {"status":"error"}
+        print("❌ Error en webhook:", e)
+        return {"status": "error"}
