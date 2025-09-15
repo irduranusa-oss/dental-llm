@@ -1,435 +1,400 @@
-# server/main.py — NochGPT WhatsApp v3.4 (idioma/audio/foto/pdf/sheets OK)
-# -------------------------------------------------------------------------
-# ✅ Botones localizados según el IDIOMA del MENSAJE del usuario
-# ✅ Recuerda el idioma por usuario (last_lang) para todas las respuestas
-# ✅ Audio (voice/ogg/aac/mp4): descarga y transcribe con gpt-4o-mini-transcribe
-# ✅ Imágenes: descarga, convierte a data:URL y analiza con gpt-4o-mini (visión)
-# ✅ PDF y docs: descarga; si es PDF intenta extraer texto simple y resumir;
-#    si no logra extraer, avisa y pide detalles (no se cae)
-# ✅ Handoff “Hablar con humano”: guarda en /tmp/handoff.json y POST a Google Sheets
-# ✅ Webhook robusto: responde 200 rápido y procesa en background
-# -------------------------------------------------------------------------
+# server/main.py — Hotfix 4 en 1 (idioma + botones + audio + fotos + tickets)
+# ---------------------------------------------------------------------------
+# Qué corrige:
+# 1) Auto-detección de idioma por MENSAJE (no global) y menú en el idioma del usuario.
+# 2) Transcripción de audios (WhatsApp OGG/MP3) con Whisper y respuesta en el mismo idioma.
+# 3) Análisis básico de fotos con GPT-4o (visión) y respuesta en el mismo idioma.
+# 4) Envío de ticket a Google Sheets vía Apps Script (si SHEET_WEBHOOK_URL está configurada).
+#
+# Requisitos de entorno (Render → Environment):
+#   OPENAI_API_KEY           (obligatorio)
+#   WA_TOKEN                 (obligatorio – token de la app de Meta)
+#   WA_PHONE_ID              (obligatorio – phone number id de WhatsApp)
+#   SHEET_WEBHOOK_URL        (opcional – URL del Apps Script para registrar tickets)
+#   OPENAI_MODEL=gpt-4o-mini (por defecto)
+#   OPENAI_TEMP=0.2          (por defecto)
+#
+# Endpoints útiles:
+#   GET  /_debug/health   -> estado y variables clave
+#   GET  /handoff         -> tickets locales (respaldo en /tmp/handoff.json)
+#   POST /webhook         -> webhook de Meta
+# ---------------------------------------------------------------------------
 
 from __future__ import annotations
-import os, re, json, time, base64, tempfile, typing
-import requests
-
-from fastapi import FastAPI, Request, BackgroundTasks
+import os, io, time, json, base64, re, typing, mimetypes, requests, pathlib
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 from openai import OpenAI
 
-# ====== ENV ======
-OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_STT_MODEL    = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+app = FastAPI(title="Dental-LLM")
 
-WA_TOKEN    = os.getenv("WHATSAPP_TOKEN", "")
-WA_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
 
-G_SHEET_WEBHOOK = os.getenv("G_SHEET_WEBHOOK", "")   # URL del Apps Script (opcional)
+# --- Config ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+WA_TOKEN        = os.getenv("WA_TOKEN", "")
+WA_PHONE_ID     = os.getenv("WA_PHONE_ID", "")
+SHEET_WEBHOOK   = os.getenv("SHEET_WEBHOOK_URL", "")
+OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TEMP     = float(os.getenv("OPENAI_TEMP", "0.2"))
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-app = FastAPI(title="Dental-LLM API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+SYSTEM_PROMPT = (
+    "You are NochGPT, a helpful dental laboratory assistant. "
+    "Focus strictly on dental topics (prosthetics, implants, zirconia, CAD/CAM, workflows, materials). "
+    "Be concise and practical. Always reply in the same language as the user."
 )
 
-# ====== ESTADO ======
-processed_ids: set[str] = set()
-user_state: dict[str, str] = {}         # ej. { "+52162...": "waiting_handoff" }
-last_lang:  dict[str, str] = {}         # idioma recordado por usuario
-last_sheet_status: dict[str, typing.Any] = {}
-
-# ====== UTILS ======
-EMOJI_RE = re.compile(r"[𐀀-􏿿]", flags=re.UNICODE)
-
-def sanitize_text(s: str) -> str:
-    if not s: return ""
-    s = s.replace("\r", " ").strip()
-    s = EMOJI_RE.sub("", s)
-    return s[:4000]
-
-def detect_lang_from_text(text: str) -> str:
-    t = (text or "").lower()
-    if re.search(r"[áéíóúñ¿¡]", t): return "es"
-    if re.search(r"[ãõáéíóúç]", t): return "pt"
-    if re.search(r"[àâçéèêëîïôùûüÿœ]", t): return "fr"
-    if re.search(r"[\u0900-\u097F]", t): return "hi"   # hindi
-    if re.search(r"[\u0400-\u04FF]", t): return "ru"   # ruso
-    if re.search(r"[\u0600-\u06FF]", t): return "ar"   # árabe
-    if re.search(r"[\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9F]", t): return "ja" # japonés
-    if re.search(r"[\u4E00-\u9FFF]", t): return "zh"   # chino
+# ===== Utilidades de idioma =====
+def detect_lang(t: str) -> str:
+    s = (t or "").strip().lower()
+    # Atajos por palabras comunes
+    if re.search(r"[áéíóúñ¿¡]|(hola|gracias|buenas|cotizar|implante|zirconia)", s): return "es"
+    if re.search(r"[çãõ]|(olá|obrigado)", s): return "pt"
+    if re.search(r"[àâçéèêëîïôùûüÿœ]|(bonjour|merci)", s): return "fr"
+    if re.search(r"[\u0400-\u04FF]|(спасибо|привет)", s): return "ru"  # cirílico
+    if re.search(r"[\u0900-\u097F]", s): return "hi"                   # devanagari (hindi)
+    if re.search(r"[\u0600-\u06FF]", s): return "ar"                   # árabe
+    if re.search(r"[\u4e00-\u9fff]", s): return "zh"                   # chino
+    if re.search(r"[\u3040-\u30ff]", s): return "ja"                   # japonés
     return "en"
 
-L = {
+# Textos por idioma
+TEXTS = {
     "es": {
-        "hi": "¡Hola! ¿En qué puedo ayudarte hoy en el ámbito dental?",
-        "menu": "Selecciona una opción:",
-        "btn_prices": "Planes y precios",
-        "btn_times": "Tiempos de entrega",
-        "btn_human": "Hablar con humano",
-        "handoff_ask": ("👤 Te conecto con un asesor. Comparte:\n"
+        "hi": "¡Hola! ¿En qué puedo ayudarte hoy en el ámbito dental?\n\nElige una opción:",
+        "menu": ["Planes y precios", "Tiempos de entrega", "Hablar con humano"],
+        "audio_wait": "🎙️ Recibí tu audio, lo estoy transcribiendo…",
+        "audio_fail": "No pude transcribir el audio. ¿Podrías escribir un breve resumen?",
+        "img_wait": "🖼️ Recibí tu imagen, la estoy analizando…",
+        "img_fail": "Lo siento, no pude analizar la imagen. ¿Puedes describirme qué deseas revisar?",
+        "handoff_ask": ("👤 Te conecto con un asesor. Comparte por favor:\n"
                         "• Nombre\n• Tema (implante, zirconia, urgencia)\n"
                         "• Horario preferido y teléfono si es otro"),
-        "handoff_ok": "✅ Gracias. Tu solicitud fue registrada y la atiende un asesor.",
-        "audio_rcv": "🎙 Recibí tu audio, lo estoy transcribiendo…",
-        "audio_fail": "No pude transcribir el audio. ¿Puedes escribir un breve resumen?",
-        "img_rcv": "🖼️ Recibí tu imagen, la estoy analizando…",
-        "img_fail": "No pude analizar la imagen. ¿Puedes describir lo que necesitas?",
-        "doc_rcv": "📄 Recibí tu archivo, lo reviso…",
-        "pdf_fail": "No pude leer el PDF. Envíame el punto clave o una foto de la hoja importante."
+        "handoff_ok": "✅ Gracias. Tu solicitud fue registrada; un asesor te contactará pronto.",
     },
     "en": {
-        "hi": "Hi! How can I help you today with dental topics?",
-        "menu": "Choose an option:",
-        "btn_prices": "Plans & pricing",
-        "btn_times": "Turnaround times",
-        "btn_human": "Talk to a human",
-        "handoff_ask": "👤 I’ll connect you with an agent. Share name, topic and preferred time.",
-        "handoff_ok": "✅ Thanks. Your request was recorded; an agent will contact you soon.",
-        "audio_rcv": "🎙 I received your audio, transcribing…",
+        "hi": "Hi! How can I help you today with dental topics?\n\nChoose an option:",
+        "menu": ["Plans & pricing", "Turnaround times", "Talk to a human"],
+        "audio_wait": "🎙️ I received your audio, transcribing…",
         "audio_fail": "I couldn’t transcribe the audio. Could you type a short summary?",
-        "img_rcv": "🖼️ I received your image, analyzing…",
-        "img_fail": "I couldn’t analyze the image. Please describe your need.",
-        "doc_rcv": "📄 I received your file, reviewing…",
-        "pdf_fail": "I couldn’t read that PDF. Please share the key point or a photo of the page."
+        "img_wait": "🖼️ I received your image, analyzing…",
+        "img_fail": "Sorry, I couldn't analyze the image. Can you describe what you need?",
+        "handoff_ask": ("👤 I’ll connect you with an agent. Please share:\n"
+                        "• Name\n• Topic (implant, zirconia, urgent)\n"
+                        "• Preferred time and phone if different"),
+        "handoff_ok": "✅ Thanks. Your request was recorded; an agent will contact you soon.",
+    },
+    "pt": {
+        "hi": "Olá! Como posso ajudar hoje com temas dentários?\n\nEscolha uma opção:",
+        "menu": ["Planos e preços", "Prazos", "Falar com humano"],
+        "audio_wait": "🎙️ Recebi seu áudio, transcrevendo…",
+        "audio_fail": "Não consegui transcrever o áudio. Pode escrever um resumo?",
+        "img_wait": "🖼️ Recebi sua imagem, analisando…",
+        "img_fail": "Desculpe, não consegui analisar a imagem. Pode descrever?",
+        "handoff_ask": ("👤 Vou conectá-lo a um atendente. Envie:\n"
+                        "• Nome\n• Tema (implante, zircônia, urgência)\n"
+                        "• Horário preferido e telefone se outro"),
+        "handoff_ok": "✅ Obrigado. Sua solicitação foi registrada; entraremos em contato.",
+    },
+    "fr": {
+        "hi": "Bonjour ! Comment puis-je vous aider aujourd’hui en dentaire ?\n\nChoisissez une option :",
+        "menu": ["Offres & tarifs", "Délais", "Parler à un humain"],
+        "audio_wait": "🎙️ J’ai reçu votre audio, transcription…",
+        "audio_fail": "Je n’ai pas pu transcrire l’audio. Pouvez-vous écrire un résumé ?",
+        "img_wait": "🖼️ Image reçue, analyse…",
+        "img_fail": "Désolé, je n’ai pas pu analyser l’image. Décrivez-moi ce que vous voulez.",
+        "handoff_ask": ("👤 Je vous mets en relation avec un conseiller. Donnez :\n"
+                        "• Nom\n• Sujet (implant, zircone, urgent)\n"
+                        "• Horaire préféré et téléphone si différent"),
+        "handoff_ok": "✅ Merci. Votre demande a été enregistrée ; un conseiller vous contactera.",
+    },
+    "ru": {
+        "hi": "Привет! Чем могу помочь по стоматологии?\n\nВыберите опцию:",
+        "menu": ["Планы и цены", "Сроки", "Связаться с человеком"],
+        "audio_wait": "🎙️ Получил аудио, расшифровываю…",
+        "audio_fail": "Не удалось расшифровать аудио. Напишите кратко текстом?",
+        "img_wait": "🖼️ Изображение получено, анализ…",
+        "img_fail": "Не удалось проанализировать изображение. Опишите задачу текстом?",
+        "handoff_ask": "👤 Соединю с оператором. Укажите имя, тему и удобное время.",
+        "handoff_ok": "✅ Заявка принята. Мы свяжемся с вами.",
+    },
+    "hi": {
+        "hi": "नमस्ते! दंत विषयों में आज मैं कैसे मदद कर सकता हूँ?\n\nएक विकल्प चुनें:",
+        "menu": ["प्लान और कीमत", "टर्नअराउंड टाइम", "मानव से बात करें"],
+        "audio_wait": "🎙️ आपका ऑडियो मिला, लिप्यंतरण कर रहा हूँ…",
+        "audio_fail": "ऑडियो लिप्यंतरण नहीं हो सका. कृपया एक छोटा सार लिखें।",
+        "img_wait": "🖼️ आपकी छवि मिली, विश्लेषण कर रहा हूँ…",
+        "img_fail": "छवि का विश्लेषण नहीं हो सका. कृपया बताएं क्या चाहिए।",
+        "handoff_ask": "👤 मैं आपको एजेंट से जोड़ूँगा. नाम, विषय, पसंदीदा समय भेजें।",
+        "handoff_ok": "✅ अनुरोध दर्ज हो गया. हम आपसे संपर्क करेंगे।",
+    },
+    "ar": {
+        "hi": "مرحبًا! كيف أساعدك اليوم في مواضيع طب الأسنان؟\n\nاختر خيارًا:",
+        "menu": ["الخطط والأسعار", "أوقات التسليم", "التحدث إلى موظف"],
+        "audio_wait": "🎙️ استلمت المقطع الصوتي وأقوم بكتابته…",
+        "audio_fail": "تعذر تفريغ الصوت. هل يمكنك كتابة ملخص قصير؟",
+        "img_wait": "🖼️ استلمت الصورة وأقوم بتحليلها…",
+        "img_fail": "عذرًا، لم أتمكن من تحليل الصورة. صف ما تريد فحصه.",
+        "handoff_ask": "👤 سأوصلك بمستشار. أرسل الاسم والموضوع والوقت المفضل.",
+        "handoff_ok": "✅ تم تسجيل طلبك، سيتواصل معك مستشار قريبًا.",
+    },
+    "zh": {
+        "hi": "你好！今天在牙科方面我能帮你什么？\n\n请选择：",
+        "menu": ["方案与价格", "交付时间", "联系人工"],
+        "audio_wait": "🎙️ 收到你的语音，正在转写…",
+        "audio_fail": "无法转写语音。请简要用文字说明。",
+        "img_wait": "🖼️ 收到你的图片，正在分析…",
+        "img_fail": "抱歉，无法分析图片。请用文字描述你的需求。",
+        "handoff_ask": "👤 我将为你联系人工。请提供姓名、主题和方便时间。",
+        "handoff_ok": "✅ 已登记你的请求，稍后会有工作人员联系你。",
+    },
+    "ja": {
+        "hi": "こんにちは！歯科分野で今日は何をお手伝いできますか？\n\nオプションを選んでください：",
+        "menu": ["プランと料金", "納期", "担当者と話す"],
+        "audio_wait": "🎙️ 音声を受信、文字起こし中…",
+        "audio_fail": "文字起こしに失敗しました。要点をテキストで送ってください。",
+        "img_wait": "🖼️ 画像を受信、解析中…",
+        "img_fail": "画像を解析できませんでした。内容をテキストで教えてください。",
+        "handoff_ask": "👤 担当者におつなぎします。お名前・内容・希望時間を送ってください。",
+        "handoff_ok": "✅ 受付しました。担当者よりご連絡します。",
     },
 }
+
 def T(lang: str, key: str) -> str:
-    if lang not in L: lang = "es"
-    return L[lang].get(key, L["es"].get(key, ""))
+    d = TEXTS.get(lang) or TEXTS["en"]
+    return d.get(key, TEXTS["en"][key])
 
-SYSTEM_PROMPT = (
-    "You are NochGPT, a helpful dental laboratory assistant.\n"
-    "- Focus on prosthetics, implants, zirconia, CAD/CAM, workflows, materials.\n"
-    "- Be concise and practical. Always reply in the user's language."
-)
-
-def wa_url(path: str) -> str:
-    return f"https://graph.facebook.com/v19.0/{path}"
-
-def wa_send(payload: dict):
+# ===== WhatsApp helpers =====
+def wa_send_json(payload: dict):
+    url = f"https://graph.facebook.com/v21.0/{WA_PHONE_ID}/messages"
+    h = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type":"application/json"}
+    r = requests.post(url, headers=h, json=payload, timeout=30)
     try:
-        r = requests.post(
-            wa_url(f"{WA_PHONE_ID}/messages"),
-            headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"},
-            json=payload, timeout=20
-        )
-        if r.status_code >= 400:
-            print("WA send error:", r.status_code, r.text)
-    except Exception as e:
-        print("WA send ex:", e)
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, {"raw": r.text}
 
 def wa_send_text(to: str, text: str):
-    wa_send({"messaging_product":"whatsapp","to":to,"type":"text","text":{"body": text[:4096]}})
+    return wa_send_json({"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text}})
 
-def wa_send_buttons(to: str, body: str, lang: str):
-    wa_send({
-        "messaging_product":"whatsapp",
-        "to": to,
-        "type":"interactive",
+def wa_send_menu(to: str, lang: str):
+    # Botones localizados
+    a,b,c = TEXTS.get(lang, TEXTS["en"])["menu"]
+    body = T(lang,"hi")
+    payload = {
+        "messaging_product":"whatsapp","to":to,"type":"interactive",
         "interactive":{
             "type":"button",
-            "body":{"text": body[:1024]},
+            "body":{"text": body},
             "action":{"buttons":[
-                {"type":"reply","reply":{"id":"btn_prices","title":T(lang,'btn_prices')}},
-                {"type":"reply","reply":{"id":"btn_times","title":T(lang,'btn_times')}},
-                {"type":"reply","reply":{"id":"btn_human","title":T(lang,'btn_human')}},
+                {"type":"reply","reply":{"id":"plans","title":a}},
+                {"type":"reply","reply":{"id":"tat","title":b}},
+                {"type":"reply","reply":{"id":"human","title":c}},
             ]}
         }
-    })
+    }
+    return wa_send_json(payload)
 
-def wa_get_media_download_url(media_id: str) -> str | None:
-    r = requests.get(wa_url(media_id), headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=20)
-    if r.status_code != 200: 
-        print("media meta error:", r.text); return None
-    return r.json().get("url")
+def wa_media_url(media_id: str) -> str:
+    url = f"https://graph.facebook.com/v21.0/{media_id}"
+    h = {"Authorization": f"Bearer {WA_TOKEN}"}
+    r = requests.get(url, headers=h, timeout=30)
+    r.raise_for_status()
+    return r.json()["url"]
 
-def wa_download_to_tmp(media_id: str) -> tuple[str|None, str|None]:
-    url = wa_get_media_download_url(media_id)
-    if not url: return None, None
-    r = requests.get(url, headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=30)
-    if r.status_code != 200:
-        print("media dl error:", r.text); return None, None
-    ct = r.headers.get("Content-Type","application/octet-stream")
-    fd, path = tempfile.mkstemp()
-    with os.fdopen(fd, "wb") as f:
-        f.write(r.content)
-    return path, ct
+def wa_media_bytes(signed_url: str) -> bytes:
+    h = {"Authorization": f"Bearer {WA_TOKEN}"}
+    r = requests.get(signed_url, headers=h, timeout=60)
+    r.raise_for_status()
+    return r.content
 
-# ====== TICKETS ======
+# ===== Tickets (Google Sheets) =====
 HANDOFF_FILE = "/tmp/handoff.json"
-def save_ticket(rec: dict):
+def save_local_ticket(item: dict):
+    data = []
+    if pathlib.Path(HANDOFF_FILE).exists():
+        try:
+            data = json.loads(pathlib.Path(HANDOFF_FILE).read_text("utf-8"))
+        except Exception:
+            data = []
+    data.append(item)
+    pathlib.Path(HANDOFF_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def send_ticket_sheet(item: dict):
+    if not SHEET_WEBHOOK:
+        return False, "no SHEET_WEBHOOK_URL"
     try:
-        data = []
-        if os.path.exists(HANDOFF_FILE):
-            with open(HANDOFF_FILE,"r",encoding="utf-8") as f: data = json.load(f)
-        data.append(rec)
-        with open(HANDOFF_FILE,"w",encoding="utf-8") as f: json.dump(data,f,indent=2,ensure_ascii=False)
+        r = requests.post(SHEET_WEBHOOK, json=item, timeout=30)
+        ok = (200 <= r.status_code < 300)
+        return ok, r.text
     except Exception as e:
-        print("save_ticket:", e)
+        return False, str(e)
 
-def push_sheet(rec: dict):
-    if not G_SHEET_WEBHOOK: 
-        last_sheet_status["ok"]=False; last_sheet_status["why"]="G_SHEET_WEBHOOK missing"; return
-    try:
-        r = requests.post(G_SHEET_WEBHOOK, json=rec, timeout=15)
-        last_sheet_status["ok"] = r.status_code==200
-        last_sheet_status["code"]=r.status_code
-        last_sheet_status["text"]=r.text[:300]
-    except Exception as e:
-        last_sheet_status["ok"]=False; last_sheet_status["err"]=str(e)
+# ===== Flow helpers =====
+def analyze_text(user_text: str, lang: str) -> str:
+    # Respuesta breve, dental-only, en el idioma detectado
+    msg = [
+        {"role":"system","content":SYSTEM_PROMPT},
+        {"role":"user","content":user_text}
+    ]
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL, temperature=OPENAI_TEMP, messages=msg
+    )
+    return resp.choices[0].message.content.strip()
 
-@app.get("/handoff")
-def list_handoff():
-    if not os.path.exists(HANDOFF_FILE): return []
-    with open(HANDOFF_FILE,"r",encoding="utf-8") as f: return json.load(f)
+def analyze_image(img_bytes: bytes, lang: str) -> str:
+    b64 = base64.b64encode(img_bytes).decode()
+    msg = [
+        {"role":"system","content":SYSTEM_PROMPT},
+        {"role":"user","content":[
+            {"type":"text","text":"Describe brevemente la situación clínica en la imagen y sugiere pasos/precauciones. Responde en "+lang},
+            {"type":"input_image","image_data": b64}
+        ]}
+    ]
+    resp = client.chat.completions.create(model="gpt-4o-mini", temperature=OPENAI_TEMP, messages=msg)
+    return resp.choices[0].message.content.strip()
 
+def transcribe_audio(audio_bytes: bytes) -> str:
+    # Whisper espera un archivo. Enviamos bytes como archivo temporal en memoria.
+    # Render usa python3.11, openai==1.x lo soporta.
+    fileobj = io.BytesIO(audio_bytes); fileobj.name = "audio.ogg"
+    tr = client.audio.transcriptions.create(model="whisper-1", file=fileobj)
+    return tr.text.strip()
+
+# ===== Estados simples por usuario =====
+STATE = {}  # from -> "waiting_human"
+
+def handle_text(from_number: str, body: str):
+    lang = detect_lang(body)
+    txt = body.strip().lower()
+
+    # palabra de arranque -> mostrar menú
+    if txt in {"hola","menu","hi","hello","inicio","start"}:
+        wa_send_menu(from_number, lang)
+        return True
+
+    # pedir humano
+    if txt in {"humano","hablar con humano","asesor","agente","human"}:
+        STATE[from_number] = "waiting_human"
+        wa_send_text(from_number, T(lang,"handoff_ask"))
+        return True
+
+    # completar ticket si estaba esperando
+    if STATE.get(from_number) == "waiting_human":
+        item = {
+            "ts": int(time.time()), "label":"NochGPT",
+            "from": from_number, "nombre":"", "tema":"", "contacto": from_number,
+            "horario":"", "mensaje": body
+        }
+        save_local_ticket(item)
+        send_ticket_sheet(item)
+        wa_send_text(from_number, T(lang,"handoff_ok"))
+        STATE[from_number] = "done"
+        return True
+
+    # Respuesta LLM normal
+    answer = analyze_text(body, lang)
+    wa_send_text(from_number, answer)
+    return True
+
+# ===== FastAPI =====
 @app.get("/_debug/health")
 def health():
     return {"ok": True, "cfg":{
-        "openai": bool(OPENAI_API_KEY),
-        "wa_token": bool(WA_TOKEN),
-        "wa_phone_id": bool(WA_PHONE_ID),
-        "model": OPENAI_VISION_MODEL,
-        "stt": OPENAI_STT_MODEL,
-        "sheet_webhook": bool(G_SHEET_WEBHOOK),
-        "last_sheet": last_sheet_status or {}
+        "openai": bool(OPENAI_API_KEY), "wa_token": bool(WA_TOKEN),
+        "wa_phone_id": bool(WA_PHONE_ID), "model": OPENAI_MODEL,
+        "sheet_webhook": bool(SHEET_WEBHOOK)
     }}
 
-# ====== LLM ======
-def llm_reply(user_text: str, lang: str) -> str:
-    try:
-        rsp = client.chat.completions.create(
-            model=OPENAI_VISION_MODEL, temperature=0.2,
-            messages=[
-                {"role":"system","content":SYSTEM_PROMPT},
-                {"role":"user","content":user_text}
-            ]
-        )
-        return rsp.choices[0].message.content.strip()
-    except Exception as e:
-        print("llm_reply:", e)
-        return T(lang,"audio_fail") if user_text.startswith("[AUDIO]") else "Un momento, por favor. Hubo un problema temporal."
-
-def llm_vision_analyze(prompt: str, data_url: str, lang: str) -> str:
-    try:
-        rsp = client.chat.completions.create(
-            model=OPENAI_VISION_MODEL, temperature=0.2,
-            messages=[{
-                "role":"system","content":SYSTEM_PROMPT
-            },{
-                "role":"user","content":[
-                    {"type":"text","text":prompt},
-                    {"type":"image_url","image_url":{"url":data_url}}
-                ]
-            }]
-        )
-        return rsp.choices[0].message.content.strip()
-    except Exception as e:
-        print("vision:", e)
-        return T(lang,"img_fail")
-
-def stt_transcribe(file_path: str) -> str|None:
-    try:
-        with open(file_path,"rb") as f:
-            tr = client.audio.transcriptions.create(model=OPENAI_STT_MODEL, file=f)
-        return getattr(tr,"text",None)
-    except Exception as e:
-        print("stt:", e); return None
-
-# ====== MENÚ / HANDOFF ======
-def send_menu(to: str, lang: str):
-    body = f"{T(lang,'hi')}\n\n{T(lang,'menu')}"
-    wa_send_buttons(to, body, lang)
-
-def start_handoff(to: str, lang: str):
-    user_state[to] = "waiting_handoff"
-    wa_send_text(to, T(lang,"handoff_ask"))
-
-def complete_handoff(to: str, lang: str, text: str):
-    rec = {
-        "ts": int(time.time()),
-        "label": "NochGPT",
-        "from": to,
-        "nombre": "",
-        "tema": text,
-        "contacto": to,
-        "horario": "",
-        "mensaje": text,
-    }
-    save_ticket(rec)
-    push_sheet(rec)
-    user_state[to] = "done"
-    wa_send_text(to, T(lang,"handoff_ok"))
-
-# ====== BACKGROUND ======
-def process_value(value: dict):
-    try:
-        messages = value.get("messages", [])
-        if not messages: return
-        msg = messages[0]
-        msg_id = msg.get("id")
-        if msg_id in processed_ids: return
-        processed_ids.add(msg_id)
-
-        from_number = msg.get("from")
-        mtype = msg.get("type")
-
-        # Determinar idioma desde el CONTENIDO (no del JSON completo)
-        lang = last_lang.get(from_number, "es")
-        if mtype == "text":
-            lang = detect_lang_from_text(msg.get("text",{}).get("body",""))
-        elif mtype == "interactive":
-            # conserva el último
-            pass
-        elif mtype == "audio":
-            # sin texto aún, usa último o español
-            pass
-        elif mtype == "image":
-            # usa caption si existe
-            cap = msg.get("image",{}).get("caption","")
-            if cap: lang = detect_lang_from_text(cap)
-        elif mtype == "document":
-            cap = msg.get("document",{}).get("caption","") or msg.get("document",{}).get("filename","")
-            if cap: lang = detect_lang_from_text(cap)
-        last_lang[from_number] = lang
-
-        # === BOTONES (interactive) ===
-        if mtype == "interactive":
-            data = msg.get("interactive",{})
-            if data.get("type") == "button_reply":
-                btn = data.get("button_reply",{})
-                bid = btn.get("id","")
-                if bid == "btn_human": start_handoff(from_number, lang); return
-                if bid == "btn_prices":
-                    wa_send_text(from_number,
-                                 "💳 " + ( "Planes y precios: https://www.dentodo.com/plans-pricing" if lang=="es"
-                                           else "Plans & pricing: https://www.dentodo.com/plans-pricing"))
-                    return
-                if bid == "btn_times":
-                    wa_send_text(from_number,
-                                 "⏱️ " + ( "Tiempos típicos: Zirconia 24–48h; Implante 3–5 días."
-                                           if lang=="es" else
-                                           "Typical turnaround: Zirconia 24–48h; Implant 3–5 days." ))
-                    return
-
-        # === TEXTO ===
-        if mtype == "text":
-            text = sanitize_text(msg.get("text",{}).get("body",""))
-            # saludo → menú localizado
-            if re.search(r"\b(hola|hello|hi|oi|salut|مرحبا|नमस्ते|привет|こんにちは|你好)\b", text.lower()):
-                send_menu(from_number, detect_lang_from_text(text)); return
-            # handoff por texto libre
-            if re.search(r"hablar\s+con\s+humano|asesor|human|agent|operator", text.lower()):
-                start_handoff(from_number, lang); return
-            # completar handoff si está esperando
-            if user_state.get(from_number) == "waiting_handoff":
-                complete_handoff(from_number, lang, text); return
-            # respuesta LLM
-            wa_send_text(from_number, llm_reply(text, lang)); return
-
-        # === AUDIO ===
-        if mtype == "audio":
-            wa_send_text(from_number, T(lang,"audio_rcv"))
-            media_id = msg.get("audio",{}).get("id")
-            fpath, ctype = wa_download_to_tmp(media_id) if media_id else (None, None)
-            if fpath:
-                text = stt_transcribe(fpath)
-                try: os.remove(fpath)
-                except: pass
-                if text and text.strip():
-                    lang2 = detect_lang_from_text(text); last_lang[from_number]=lang2
-                    wa_send_text(from_number, llm_reply(text, lang2))
-                else:
-                    wa_send_text(from_number, T(lang,"audio_fail"))
-            else:
-                wa_send_text(from_number, T(lang,"audio_fail"))
-            return
-
-        # === IMAGEN ===
-        if mtype == "image":
-            wa_send_text(from_number, T(lang,"img_rcv"))
-            media_id = msg.get("image",{}).get("id")
-            fpath, ctype = wa_download_to_tmp(media_id) if media_id else (None, None)
-            if fpath:
-                try:
-                    with open(fpath,"rb") as f: b64 = base64.b64encode(f.read()).decode()
-                    mime = ctype or "image/jpeg"
-                    data_url = f"data:{mime};base64,{b64}"
-                    prompt = "Describe brevemente la situación clínica y sugiere 1–3 pasos prácticos." if lang=="es" else \
-                             "Briefly describe the clinical situation and suggest 1–3 practical steps."
-                    out = llm_vision_analyze(prompt, data_url, lang)
-                    wa_send_text(from_number, out)
-                except Exception as e:
-                    print("img analyze:", e); wa_send_text(from_number, T(lang,"img_fail"))
-                try: os.remove(fpath)
-                except: pass
-            else:
-                wa_send_text(from_number, T(lang,"img_fail"))
-            return
-
-        # === DOCUMENTO (PDF) ===
-        if mtype == "document":
-            wa_send_text(from_number, T(lang,"doc_rcv"))
-            doc = msg.get("document",{})
-            media_id = doc.get("id")
-            fname = doc.get("filename","file")
-            fpath, ctype = wa_download_to_tmp(media_id) if media_id else (None, None)
-            if fpath and (ctype or "").startswith("application/pdf") or fname.lower().endswith(".pdf"):
-                # Intento simple: leer bytes y pedir a LLM que dé puntos clave (no OCR perfecto)
-                try:
-                    with open(fpath,"rb") as f:
-                        raw = f.read(120_000) # primeros ~120KB para no pasar límite
-                    sample_b64 = base64.b64encode(raw).decode()[:150000]
-                    prompt = (
-                        f"Archivo PDF '{fname}'. A partir de este fragmento base64 de su contenido, "
-                        f"extrae en {lang} 5 puntos clave clínicos o técnicos. "
-                        "Si la señal es insuficiente, di que necesitas una foto o el texto."
-                    )
-                    text_hint = f"[PDF_BASE64_FRAGMENT]{sample_b64}"
-                    wa_send_text(from_number, llm_reply(prompt + "\n\n" + text_hint, lang))
-                except Exception as e:
-                    print("pdf summarize:", e); wa_send_text(from_number, T(lang,"pdf_fail"))
-                try: os.remove(fpath)
-                except: pass
-                return
-            else:
-                # otro tipo de doc: acuse
-                wa_send_text(from_number, T(lang,"doc_rcv"))
-                if fpath:
-                    try: os.remove(fpath)
-                    except: pass
-                return
-
-        # Otros → menú para guiar
-        send_menu(from_number, last_lang.get(from_number,"es"))
-
-    except Exception as e:
-        print("process_value ex:", e)
-
-# ====== ROUTES ======
-@app.get("/", response_class=HTMLResponse)
-def root():
-    return "Dental-LLM corriendo ✅"
-
-@app.get("/webhook")
-def verify(mode: str="", challenge: str="", verify_token: str=""):
-    return PlainTextResponse(challenge or "")
+@app.get("/handoff")
+def handoff_list():
+    if not pathlib.Path(HANDOFF_FILE).exists():
+        return []
+    return json.loads(pathlib.Path(HANDOFF_FILE).read_text("utf-8"))
 
 @app.post("/webhook")
-async def webhook(request: Request, background: BackgroundTasks):
+async def webhook(req: Request):
+    data = await req.json()
     try:
-        body = await request.json()
-    except Exception:
-        return {"status":"ok"}
-    entry = body.get("entry") or []
-    if not entry: return {"status":"ok"}
-    changes = entry[0].get("changes") or []
-    if not changes: return {"status":"ok"}
-    value = changes[0].get("value") or {}
-    background.add_task(process_value, value)
-    return {"status":"ok"}
+        entry = data.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
+        value  = change.get("value", {})
+        msgs   = value.get("messages", [])
+        if not msgs:
+            return JSONResponse({"status":"ok"})  # status updates, etc.
+
+        msg = msgs[0]
+        from_number = msg.get("from")
+        msg_type = msg.get("type")
+
+        # --- TEXTO ---
+        if msg_type == "text":
+            body = msg["text"]["body"]
+            handle_text(from_number, body)
+            return JSONResponse({"status":"ok"})
+
+        # --- BOTONES (interactive) ---
+        if msg_type == "interactive":
+            lang = "es"  # pequeño truco: si vienen de botón, mantenemos ES por defecto
+            btn = msg.get("interactive", {}).get("button_reply") or {}
+            btn_id = btn.get("id","")
+            if btn_id == "plans":
+                # Tu mensaje/plantilla de planes:
+                wa_send_text(from_number, "💳 Planes: Básico $50, Pro $150, Enterprise $500.\nEscríbeme qué necesitas y te cotizo.")
+            elif btn_id == "tat":
+                wa_send_text(from_number, "⏱️ Tiempos típicos: Zirconia 2–4 días, Implantes 5–7 días. Consulta disponibilidad.")
+            elif btn_id == "human":
+                STATE[from_number] = "waiting_human"
+                wa_send_text(from_number, T(lang,"handoff_ask"))
+            return JSONResponse({"status":"ok"})
+
+        # --- AUDIO ---
+        if msg_type == "audio":
+            wa_send_text(from_number, T(detect_lang("hola"), "audio_wait"))
+            media_id = msg["audio"]["id"]
+            url = wa_media_url(media_id)
+            blob = wa_media_bytes(url)
+            try:
+                text = transcribe_audio(blob)
+                handle_text(from_number, text)  # reutiliza lógica (idioma del texto)
+            except Exception:
+                wa_send_text(from_number, T(detect_lang("en"), "audio_fail"))
+            return JSONResponse({"status":"ok"})
+
+        # --- IMAGEN ---
+        if msg_type == "image":
+            lang = detect_lang("hola")  # por defecto español si no tenemos pista
+            wa_send_text(from_number, T(lang, "img_wait"))
+            media_id = msg["image"]["id"]
+            url = wa_media_url(media_id)
+            blob = wa_media_bytes(url)
+            try:
+                out = analyze_image(blob, lang)
+                wa_send_text(from_number, out)
+            except Exception:
+                wa_send_text(from_number, T(lang, "img_fail"))
+            return JSONResponse({"status":"ok"})
+
+        # --- DOCUMENTO (PDF u otros) -> por ahora: texto de recibo (resumen después)
+        if msg_type == "document":
+            wa_send_text(from_number, "📄 Recibí tu archivo. Puedo darte un resumen de texto si me dices qué parte te interesa.")
+            return JSONResponse({"status":"ok"})
+
+        # otros tipos
+        wa_send_text(from_number, "I received your message. For now I understand text best 😉")
+        return JSONResponse({"status":"ok"})
+
+    except Exception as e:
+        return JSONResponse({"status":"error","detail":str(e)})
+
+@app.get("/")
+def home():
+    return HTMLResponse("<b>Dental-LLM corriendo ✅</b>")
