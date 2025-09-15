@@ -424,3 +424,114 @@ async def webhook_handler(request: Request):
                         wa_send_text(from_number, fixed)
                     return {"status": "ok"}
                 
+                # Si no coincidió con un botón, usar el LLM
+                try:
+                    lang = detect_lang(user_text)
+                    answer = call_openai(user_text, lang_hint=lang)
+                except Exception:
+                    answer = "Lo siento, tuve un problema procesando tu mensaje."
+                
+                if from_number:
+                    wa_send_text(from_number, answer)
+                return {"status": "ok"}
+            
+            # 2) Imagen
+            if mtype == "image":
+                img = msg.get("image") or {}
+                media_id = img.get("id")
+                caption = (img.get("caption") or "").strip()
+                
+                if media_id and from_number:
+                    try:
+                        url = wa_get_media_url(media_id)
+                        path, mime = wa_download_media(url)
+                        print(f"🖼️ Imagen guardada en {path} ({mime})")
+                        
+                        analysis = analyze_image_with_openai(path, caption)
+                        wa_send_text(from_number, f"🖼️ Análisis breve:\n{analysis}")
+                    except Exception as e:
+                        print("Error imagen:", e)
+                        wa_send_text(from_number, "No pude analizar la imagen. ¿Puedes intentar de nuevo?")
+                    return {"status": "ok"}
+            
+            # 3) Documento (PDF)
+            if mtype == "document":
+                doc = msg.get("document") or {}
+                media_id = doc.get("id")
+                filename = doc.get("filename") or "documento.pdf"
+                
+                if media_id and from_number:
+                    try:
+                        url = wa_get_media_url(media_id)
+                        path, mime = wa_download_media(url)
+                        print(f"📄 Documento guardado en {path} ({mime})")
+                        
+                        if "pdf" in mime or filename.lower().endswith(".pdf"):
+                            raw = extract_pdf_text(path, max_chars=20000)
+                            if raw:
+                                summary = summarize_document_with_openai(raw)
+                                wa_send_text(from_number, f"📄 Resumen de *{filename}*:\n{summary}")
+                            else:
+                                wa_send_text(
+                                    from_number,
+                                    "Recibí tu PDF pero no pude leerlo aquí. "
+                                    "Agrega *PyPDF2==3.0.1* a requirements.txt y vuelvo a intentarlo."
+                                )
+                        else:
+                            wa_send_text(
+                                from_number,
+                                f"Recibí *{filename}*. Por ahora analizo PDFs; si puedes convertirlo a PDF, te lo resumo."
+                            )
+                    except Exception as e:
+                        print("Error documento:", e)
+                        wa_send_text(from_number, "No pude procesar el documento. ¿Puedes intentar de nuevo?")
+                    return {"status": "ok"}
+            
+            # 4) Audio / Nota de voz
+            if mtype == "audio":
+                aud = msg.get("audio") or {}
+                media_id = aud.get("id")
+                
+                if media_id and from_number:
+                    try:
+                        url = wa_get_media_url(media_id)
+                        path, mime = wa_download_media(url)
+                        print(f"🎧 Audio guardado en {path} ({mime})")
+                        
+                        transcript = transcribe_audio_with_openai(path)
+                        if transcript:
+                            lang = detect_lang(transcript)
+                            answer = call_openai(
+                                f"Transcripción del audio del usuario:\n\"\"\"{transcript}\"\"\"\n\n"
+                                "Responde de forma útil, breve y enfocada en odontología cuando aplique.",
+                                lang_hint=lang,
+                            )
+                            wa_send_text(
+                                from_number,
+                                f"🗣️ *Transcripción*:\n{transcript}\n\n💬 *Respuesta*:\n{answer}"
+                            )
+                        else:
+                            wa_send_text(from_number, "No pude transcribir el audio. ¿Puedes intentar otra nota de voz?")
+                    except Exception as e:
+                        print("Error audio:", e)
+                        wa_send_text(from_number, "No pude procesar el audio. ¿Puedes intentar de nuevo?")
+                    return {"status": "ok"}
+            
+            # 5) Otros tipos
+            if from_number:
+                wa_send_text(
+                    from_number,
+                    "Recibí tu mensaje. Por ahora manejo texto, imágenes, PDFs y audios (notas de voz). "
+                    "Si necesitas algo con video/ubicación, avísame."
+                )
+                return {"status": "ok"}
+        
+        # B) Status (entregado/leído, etc.)
+        if value.get("statuses"):
+            return {"status": "status_ok"}
+        
+        return {"status": "no_message"}
+    
+    except Exception as e:
+        print("❌ Error en webhook:", e)
+        return {"status": "error"}
