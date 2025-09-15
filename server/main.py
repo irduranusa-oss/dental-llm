@@ -1,4 +1,4 @@
-# server/main.py — NochGPT WhatsApp v3.1 (estable)
+# server/main.py — NochGPT WhatsApp v3.2 (mejorado)
 # -------------------------------------------------
 # ✅ Webhook sólido (no falla si Meta manda payloads vacíos)
 # ✅ Responde 200 de inmediato y procesa en background
@@ -7,13 +7,15 @@
 # ✅ "Hablar con humano" → ticket en /tmp/handoff.json y webhook a Google Sheets (opcional)
 # ✅ Audio: descarga y transcribe (gpt-4o-mini-transcribe)
 # ✅ Imagen: análisis con visión (gpt-4o-mini)
-# ✅ PDF/Docs: acuse de recibido
+# ✅ PDF/Docs: extracción de texto y análisis
 # -------------------------------------------------
 
 from __future__ import annotations
 import os, time, json, re, base64, mimetypes, pathlib, typing, tempfile
 from collections import defaultdict
 import requests
+import PyPDF2
+from io import BytesIO
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,6 +104,10 @@ L = {
         "img_rcv": "🖼️ Recibí tu imagen, la estoy analizando...",
         "img_fail": "No pude analizar la imagen. ¿Puedes describir lo que necesitas?",
         "doc_rcv": "📄 Recibí tu archivo. ¿Qué te gustaría obtener de este documento?",
+        "pdf_processing": "📄 Analizando el documento PDF...",
+        "pdf_fail": "No pude extraer texto del PDF. ¿Puedes describir su contenido?",
+        "pdf_too_large": "El PDF es demasiado grande. Por favor envía un documento más pequeño o comparte los puntos principales.",
+        "image_analysis_prompt": "Describe brevemente la situación clínica y sugiere 1–3 pasos prácticos.",
     },
     "en": {
         "greeting": "Hi! How can I help you today with dental topics?",
@@ -109,15 +115,19 @@ L = {
         "btn_quote": "Plans & pricing",
         "btn_times": "Turnaround times",
         "btn_human": "Talk to a human",
-        "handoff_ask": ("👤 I’ll connect you with an agent. Please share:\n"
+        "handoff_ask": ("👤 I'll connect you with an agent. Please share:\n"
                         "• Name\n• Topic (implant, zirconia, urgent)\n"
                         "• Preferred time and phone if different"),
         "handoff_ok": "✅ Thanks. Your request was recorded; an agent will contact you soon.",
         "audio_rcv": "🎙 I received your audio, transcribing...",
-        "audio_fail": "I couldn’t transcribe the audio. Could you type a short summary?",
+        "audio_fail": "I couldn't transcribe the audio. Could you type a short summary?",
         "img_rcv": "🖼️ I received your image, analyzing...",
-        "img_fail": "I couldn’t analyze the image. Could you describe your need?",
+        "img_fail": "I couldn't analyze the image. Could you describe your need?",
         "doc_rcv": "📄 I received your file. What would you like from this document?",
+        "pdf_processing": "📄 Processing the PDF document...",
+        "pdf_fail": "I couldn't extract text from the PDF. Could you describe its content?",
+        "pdf_too_large": "The PDF is too large. Please send a smaller document or share the main points.",
+        "image_analysis_prompt": "Briefly describe the clinical situation and suggest 1–3 practical steps.",
     },
     "pt": {"greeting": "Olá! Como posso ajudar hoje em odontologia?",
            "menu_text":"Escolha uma opção:",
@@ -128,17 +138,25 @@ L = {
            "audio_fail":"Não consegui transcrever o áudio. Pode descrever em texto?",
            "img_rcv":"🖼 Recebi sua imagem, analisando...",
            "img_fail":"Não consegui analisar a imagem. Pode descrever?",
-           "doc_rcv":"📄 Recebi seu arquivo. O que deseja obter?"},
-    "fr": {"greeting":"Salut ! Comment puis-je t’aider en dentaire aujourd’hui ?",
+           "doc_rcv":"📄 Recebi seu arquivo. O que deseja obter?",
+           "pdf_processing":"📄 Processando o documento PDF...",
+           "pdf_fail":"Não consegui extrair texto do PDF. Pode descrever o conteúdo?",
+           "pdf_too_large":"O PDF é muito grande. Envie um documento menor ou compartilhe os pontos principais.",
+           "image_analysis_prompt":"Descreva brevemente a situação clínica e sugira 1–3 passos práticos."},
+    "fr": {"greeting":"Salut ! Comment puis-je t'aider en dentaire aujourd'hui ?",
            "menu_text":"Choisis une option :",
            "btn_quote":"Forfaits et tarifs","btn_times":"Délais","btn_human":"Parler à un humain",
            "handoff_ask":"👤 Je te mets en contact. Indique nom, sujet et horaire préféré.",
            "handoff_ok":"✅ Demande enregistrée ; un agent te contactera.",
            "audio_rcv":"🎙 Audio reçu, transcription en cours...",
-           "audio_fail":"Je n’ai pas pu transcrire l’audio. Peux-tu résumer par écrit ?",
+           "audio_fail":"Je n'ai pas pu transcrire l'audio. Peux-tu résumer par écrit ?",
            "img_rcv":"🖼 Image reçue, analyse en cours...",
-           "img_fail":"Je n’ai pas pu analyser l’image. Peux-tu décrire ?",
-           "doc_rcv":"📄 Fichier reçu. Que souhaites-tu en tirer ?"},
+           "img_fail":"Je n'ai pas pu analyser l'image. Peux-tu décrire ?",
+           "doc_rcv":"📄 Fichier reçu. Que souhaites-tu en tirer ?",
+           "pdf_processing":"📄 Traitement du document PDF...",
+           "pdf_fail":"Je n'ai pas pu extraire le texte du PDF. Peux-tu décrire son contenu ?",
+           "pdf_too_large":"Le PDF est trop volumineux. Envoie un document plus petit ou partage les points principaux.",
+           "image_analysis_prompt":"Décris brièvement la situation clinique et suggère 1–3 étapes pratiques."},
     "hi": {"greeting":"नमस्ते! दंत विषयों में मैं आज आपकी कैसे मदद कर सकता हूँ?",
            "menu_text":"एक विकल्प चुनें:",
            "btn_quote":"प्लान और कीमत","btn_times":"डिलिवरी समय","btn_human":"मानव से बात करें",
@@ -148,7 +166,11 @@ L = {
            "audio_fail":"ऑडियो ट्रांसक्राइब नहीं कर पाया। कृपया संक्षेप में लिखें।",
            "img_rcv":"🖼 आपकी छवि मिली, विश्लेषण कर रहा हूँ...",
            "img_fail":"छवि विश्लेषण नहीं हो पाया। कृपया वर्णन करें।",
-           "doc_rcv":"📄 फ़ाइल मिली। आप क्या चाहते हैं?"},
+           "doc_rcv":"📄 फ़ाइल मिली। आप क्या चाहते हैं?",
+           "pdf_processing":"📄 PDF दस्तावेज़ प्रसंस्करण...",
+           "pdf_fail":"PDF से पाठ निकाल नहीं सका। कृपया सामग्री का वर्णन करें।",
+           "pdf_too_large":"PDF बहुत बड़ा है। कृपया एक छोटा दस्तावेज़ भेजें या मुख्य बिंदु साझा करें।",
+           "image_analysis_prompt":"संक्षेप में नैदानिक स्थिति का वर्णन करें और 1-3 व्यावहारिक कदम सुझाएं।"},
     "ru": {"greeting":"Привет! Чем могу помочь по стоматологии?",
            "menu_text":"Выберите вариант:",
            "btn_quote":"Тарифы","btn_times":"Сроки","btn_human":"Связаться с оператором",
@@ -158,17 +180,25 @@ L = {
            "audio_fail":"Не удалось расшифровать аудио. Кратко опишите текстом.",
            "img_rcv":"🖼 Получил изображение, анализирую...",
            "img_fail":"Не удалось проанализировать изображение. Опишите словами.",
-           "doc_rcv":"📄 Получил файл. Что требуется?"},
+           "doc_rcv":"📄 Получил файл. Что требуется?",
+           "pdf_processing":"📄 Обрабатываю PDF-документ...",
+           "pdf_fail":"Не удалось извлечь текст из PDF. Опишите содержание.",
+           "pdf_too_large":"PDF слишком большой. Отправьте меньший документ или основные пункты.",
+           "image_analysis_prompt":"Кратко опишите клиническую ситуацию и предложите 1–3 практических шага."},
     "ar": {"greeting":"مرحبًا! كيف يمكنني مساعدتك اليوم في طب الأسنان؟",
            "menu_text":"اختر خيارًا:",
            "btn_quote":"الخطط والأسعار","btn_times":"أوقات التسليم","btn_human":"التحدث مع بشري",
            "handoff_ask":"👤 أرسل الاسم، الموضوع، والوقت المفضل.",
            "handoff_ok":"✅ تم تسجيل طلبك وسيتم التواصل معك قريبًا.",
            "audio_rcv":"🎙 تم استلام الصوت، جاري التفريغ...",
-           "audio_fail":"تعذّر تفريغ الصوت. رجاءً لخصّ نصيًا.",
+           "audio_fail":"تعذر تفريغ الصوت. رجاءً لخصّ نصيًا.",
            "img_rcv":"🖼 تم استلام الصورة، جاري التحليل...",
-           "img_fail":"تعذّر تحليل الصورة. صف ما تحتاجه.",
-           "doc_rcv":"📄 تم استلام الملف. ماذا تريد منه؟"},
+           "img_fail":"تعذر تحليل الصورة. صف ما تحتاجه.",
+           "doc_rcv":"📄 تم استلام الملف. ماذا تريد منه?",
+           "pdf_processing":"📄 معالجة مستند PDF...",
+           "pdf_fail":"لم أستطع استخراج النص من PDF. يرجى وصف المحتوى.",
+           "pdf_too_large":"ملف PDF كبير جدًا. أرسل مستندًا أصغر أو شارك النقاط الرئيسية.",
+           "image_analysis_prompt":"صف بإيجاز الحالة السريرية واقترح 1-3 خطوات عملية."},
     "ja": {"greeting":"こんにちは！今日は歯科分野で何をお手伝いできますか？",
            "menu_text":"オプションを選んでください：",
            "btn_quote":"プランと料金","btn_times":"納期","btn_human":"担当者に相談",
@@ -178,7 +208,11 @@ L = {
            "audio_fail":"文字起こしに失敗しました。短くテキストで教えてください。",
            "img_rcv":"🖼 画像を受信。解析中…",
            "img_fail":"画像解析に失敗しました。内容を説明してください。",
-           "doc_rcv":"📄 ファイルを受信。ご希望は？"},
+           "doc_rcv":"📄 ファイルを受信。ご希望は？",
+           "pdf_processing":"📄 PDF文書を処理中...",
+           "pdf_fail":"PDFからテキストを抽出できませんでした。内容を説明してください。",
+           "pdf_too_large":"PDFが大きすぎます。小さなドキュメントを送信するか、主なポイントを共有してください。",
+           "image_analysis_prompt":"臨床状況を簡潔に説明し、1〜3の実践的なステップを提案してください。"},
     "zh": {"greeting":"你好！今天我能在牙科方面怎么帮助你？",
            "menu_text":"请选择：",
            "btn_quote":"套餐与价格","btn_times":"交付时间","btn_human":"人工客服",
@@ -188,7 +222,11 @@ L = {
            "audio_fail":"无法转写语音，请简单文字说明。",
            "img_rcv":"🖼 收到图片，正在分析…",
            "img_fail":"无法分析图片，请描述你的需求。",
-           "doc_rcv":"📄 收到文件，你想得到什么信息？"},
+           "doc_rcv":"📄 收到文件，你想得到什么信息？",
+           "pdf_processing":"📄 处理PDF文档中...",
+           "pdf_fail":"无法从PDF提取文本。请描述内容。",
+           "pdf_too_large":"PDF太大。请发送较小的文档或分享主要要点。",
+           "image_analysis_prompt":"简要描述临床情况并建议1-3个实用步骤。"},
 }
 
 def T(lang: str, key: str) -> str:
@@ -248,6 +286,19 @@ def wa_download_media_url(media_id: str) -> str | None:
     with os.fdopen(fd, "wb") as f:
         f.write(r2.content)
     return tmp
+
+# ---------- PDF Processing ----------
+def extract_text_from_pdf(file_path: str) -> str:
+    try:
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+    except Exception as e:
+        print("PDF extraction error:", e)
+        return None
 
 # ---------- Tickets ----------
 HANDOFF_FILE = "/tmp/handoff.json"
@@ -443,36 +494,64 @@ def process_message(value: dict):
         # Imagen
         if mtype == "image":
             wa_send_text(from_number, T(lang,"img_rcv"))
-            image = msg.get("image", {})
-            media_id = image.get("id")
-            # Para visión, podemos usar la URL temporal directamente con token
-            # (descarga directa y convertir a base64 NO es necesario con gpt-4o-mini si usamos url pública;
-            #  como la URL de Meta requiere auth, devolvemos una mini-caption)
-            # Estrategia: intentar obtener URL y pasarla; si no, fallback a texto.
-            try:
-                meta = requests.get(wa_url(media_id), headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=20)
-                url = meta.json().get("url")
-                if url:
-                    # OpenAI vision acepta URL accesibles públicamente; la URL de Meta requiere token.
-                    # Truco: creamos un link "data:" no soportado; así que pedimos descripción sin imagen.
-                    # Mejor: descargamos y subimos como base64 a image_url data URL.
-                    binr = requests.get(url, headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=30)
-                    if binr.status_code==200:
-                        b64 = base64.b64encode(binr.content).decode()
-                        data_url = f"data:{image.get('mime_type','image/jpeg')};base64,{b64}"
-                        prompt = {"es":"Describe brevemente la situación clínica y sugiere 1–3 pasos prácticos.",
-                                  "en":"Briefly describe the clinical situation and suggest 1–3 practical steps."}.get(lang,
-                                  "Briefly describe the clinical situation and suggest 1–3 practical steps.")
-                        out = llm_vision(lang, prompt, data_url)
-                        wa_send_text(from_number, out)
-                        return
-            except Exception as e:
-                print("image flow error:", e)
-            wa_send_text(from_number, T(lang,"img_fail"))
+            media_id = msg.get("image",{}).get("id")
+            fpath = wa_download_media_url(media_id) if media_id else None
+            if fpath:
+                try:
+                    # Convertir a base64
+                    with open(fpath, "rb") as img_file:
+                        b64 = base64.b64encode(img_file.read()).decode()
+                    data_url = f"data:image/jpeg;base64,{b64}"
+                    
+                    prompt = T(lang, "image_analysis_prompt")
+                    out = llm_vision(lang, prompt, data_url)
+                    wa_send_text(from_number, out)
+                except Exception as e:
+                    print("Image analysis error:", e)
+                    wa_send_text(from_number, T(lang,"img_fail"))
+                finally:
+                    try: os.remove(fpath)
+                    except: pass
+            else:
+                wa_send_text(from_number, T(lang,"img_fail"))
             return
 
-        # Documentos (PDF u otros)
-        if mtype in ("document","sticker"):
+        # Documentos (PDF)
+        if mtype == "document":
+            ext = pathlib.Path(msg.get("document",{}).get("filename","")).suffix.lower()
+            if ext == ".pdf":
+                wa_send_text(from_number, T(lang,"pdf_processing"))
+                media_id = msg.get("document",{}).get("id")
+                fpath = wa_download_media_url(media_id) if media_id else None
+                if fpath:
+                    # Verificar tamaño del archivo (límite de 5MB)
+                    file_size = os.path.getsize(fpath)
+                    if file_size > 5 * 1024 * 1024:  # 5MB
+                        wa_send_text(from_number, T(lang,"pdf_too_large"))
+                        try: os.remove(fpath)
+                        except: pass
+                        return
+                    
+                    pdf_text = extract_text_from_pdf(fpath)
+                    try: os.remove(fpath)
+                    except: pass
+                    if pdf_text:
+                        # Limitar el texto a 3000 caracteres para no exceder tokens
+                        prompt = f"Resume este documento PDF y destaca los puntos principales: {pdf_text[:3000]}"
+                        response = llm_chat(lang, prompt)
+                        wa_send_text(from_number, response)
+                    else:
+                        wa_send_text(from_number, T(lang,"pdf_fail"))
+                else:
+                    wa_send_text(from_number, T(lang,"pdf_fail"))
+                return
+            else:
+                # Para otros tipos de documentos
+                wa_send_text(from_number, T(lang,"doc_rcv"))
+                return
+
+        # Stickers u otros tipos
+        if mtype == "sticker":
             wa_send_text(from_number, T(lang,"doc_rcv"))
             return
 
