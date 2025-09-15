@@ -19,7 +19,7 @@ DetectorFactory.seed = 0
 # -------------------------------------------------------
 # FastAPI
 # -------------------------------------------------------
-app = FastAPI(title="Dental-LLM API")
+app = FastAPI(title="Dental-LLM API", root_path="/api")
 
 app.add_middleware(
     CORSMiddleware,
