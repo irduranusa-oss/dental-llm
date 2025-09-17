@@ -315,6 +315,46 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True, "root_path": ROOT_PATH}
+# ====== ENDPOINTS PARA EL FRONT (WIX) ======
+# Modelo de entrada para /chat
+class ChatIn(BaseModel):
+    pregunta: str
+    idioma: str | None = None
+
+# Historial simple en memoria (se perderá si el dyno se reinicia; suficiente para Wix)
+HISTORY_LOG: list[str] = []
+
+def _append_history(q: str, a: str, lang: str | None):
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        HISTORY_LOG.append(f"[{ts}] ({lang or 'en'})\nQ: {q}\nA: {a}\n")
+        # evita crecer infinito
+        if len(HISTORY_LOG) > 500:
+            del HISTORY_LOG[: len(HISTORY_LOG) - 500]
+    except Exception:
+        pass
+
+@app.post("/chat")
+async def chat_endpoint(body: ChatIn):
+    """
+    Endpoint que espera: { "pregunta": "...", "idioma": "es|en|..." }
+    y responde: { "respuesta": "..." }
+    """
+    q = (body.pregunta or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Falta 'pregunta'")
+
+    lang = body.idioma or detect_lang(q)
+    ans = call_openai(q, lang_hint=lang)
+    _append_history(q, ans, lang)
+    return {"respuesta": ans}
+
+@app.get("/history")
+def get_history():
+    """
+    Wix hace GET /history y espera un JSON con el texto del historial.
+    """
+    return {"history": "\n".join(HISTORY_LOG)}
 
 # -------------------------------------------------------
 # Webhook Verify (GET)
