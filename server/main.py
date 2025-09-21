@@ -487,3 +487,59 @@ def _handle_audio_message(msg: dict, from_number: Optional[str]) -> dict:
         if from_number:
             wa_send_text(from_number, "No pude procesar el audio. Intenta nuevamente, por favor.")
         return {"status": "audio_error"}
+from fastapi.responses import HTMLResponse
+
+WIDGET_HTML_MIN = """
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NochGPT – Widget</title>
+<style>
+  html,body{margin:0;padding:0;background:#0b5ed7;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+  .wrap{max-width:1100px;margin:0 auto;padding:16px}
+  .card{background:#0b1220;border-radius:14px;padding:16px;color:#e2e8f0;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  h1{margin:0 0 10px;font-size:22px}
+  small{color:#9fb0c0}
+  textarea{width:100%;min-height:120px;border-radius:12px;border:1px solid #334155;background:#0b1220;color:#e2e8f0;font-size:16px;padding:12px}
+  button{background:#22d3ee;border:0;border-radius:10px;color:#0b1220;font-weight:700;padding:12px 16px;cursor:pointer;margin-top:10px}
+  .out{margin-top:12px;white-space:pre-wrap;background:#0b1220;border-radius:12px;padding:12px;border:1px solid #334155}
+</style>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>NochGPT – Asistente Dental</h1>
+      <small>Escribe tu consulta clínica (idioma detectado automáticamente)</small>
+      <textarea id="q" placeholder="Ej.: Parámetros de sinterizado para zirconia..."></textarea>
+      <button id="send">Enviar</button>
+      <div id="out" class="out" hidden></div>
+    </div>
+  </div>
+<script>
+(function(){
+  const API = location.origin.replace(/\\/$/,'') + "/chat";
+  const q = document.getElementById('q');
+  const out = document.getElementById('out');
+  const btn = document.getElementById('send');
+  async function send(){
+    const text = (q.value||'').trim();
+    if(!text) return;
+    btn.disabled = true; btn.textContent = "Consultando…";
+    try{
+      const r = await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pregunta:text})});
+      const j = await r.json();
+      out.textContent = j.respuesta || "Sin respuesta"; out.hidden = false;
+    }catch(_){ out.textContent = "Error de conexión."; out.hidden = false; }
+    btn.disabled = false; btn.textContent = "Enviar";
+  }
+  btn.addEventListener('click', send);
+  q.addEventListener('keydown', e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ send(); }});
+})();
+</script>
+</body>
+</html>
+"""
+
+@app.get("/widget", response_class=HTMLResponse)
+def widget_min():
+    return HTMLResponse(WIDGET_HTML_MIN, status_code=200, headers={"Cache-Control": "no-store"})
