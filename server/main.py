@@ -36,6 +36,10 @@ OPENAI_TEMP = float(os.getenv("OPENAI_TEMP", "0.2"))
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "nochgpt-verify-123")
+# 📘 Agregamos aquí la variable del servicio de Wikipedia
+
+WIKIPEDIA_TOOL_URL = os.getenv("WIKIPEDIA_TOOL_URL", "https://wikipedia-rag-tool.onrender.com")
+
 SHEETS_WEBHOOK_URL = (
     os.getenv("SHEET_WEBHOOK", "").strip() or 
     os.getenv("SHEETS_WEBHOOK_URL", "").strip() or 
