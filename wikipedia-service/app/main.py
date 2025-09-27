@@ -1,13 +1,15 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
 
 app = FastAPI()
 
-# ==========================================
-# MODELOS DE ENTRADA Y RESPUESTA
-# ==========================================
+# ---------- salud ----------
+@app.get("/health")
+def health():
+    return {"ok": True, "message": "service alive"}
 
+# ---------- modelos ----------
 class ToolCallRequest(BaseModel):
     query: str
     lang: str = "es"
@@ -19,58 +21,44 @@ class ToolCallResponse(BaseModel):
     language: str
     candidates: list
 
-# ==========================================
-# FUNCIÓN PRINCIPAL DE CONSULTA A WIKIPEDIA
-# ==========================================
-
+# ---------- endpoint principal /tool ----------
 @app.post("/tool")
 def tool(req: ToolCallRequest):
-    lang = req.lang
-    query = req.query
-    top_k = req.top_k
-    max_chars = req.max_chars
-
+    lang = req.lang or "es"
     url = f"https://{lang}.wikipedia.org/w/api.php"
     params = {
         "action": "query",
         "list": "search",
-        "srsearch": query,
+        "srsearch": req.query,
         "utf8": 1,
         "format": "json",
-        "srlimit": top_k
+        "srlimit": req.top_k
     }
+    r = requests.get(url, params=params, timeout=15)
+    data = r.json()
 
-    response = requests.get(url, params=params)
-    data = response.json()
+    cands = []
+    for hit in data.get("query", {}).get("search", []):
+        title = hit.get("title", "")
+        snippet = (hit.get("snippet", "") or "").replace(
+            '<span class="searchmatch">', ""
+        ).replace("</span>", "")
+        snippet = snippet[: req.max_chars]
+        cands.append({"title": title, "snippet": snippet, "chunks": [snippet]})
 
-    candidates = []
-    for r in data.get("query", {}).get("search", []):
-        title = r.get("title", "")
-        snippet = r.get("snippet", "")
-        snippet_clean = snippet.replace("<span class=\"searchmatch\">", "").replace("</span>", "")
-        snippet_trimmed = snippet_clean[:max_chars]
-        candidates.append({
-            "title": title,
-            "snippet": snippet_trimmed,
-            "chunks": [snippet_trimmed]
-        })
+    return ToolCallResponse(query=req.query, language=lang, candidates=cands)
 
-    return ToolCallResponse(query=query, language=lang, candidates=candidates)
-
-# ==========================================
-# ESPECIFICACIÓN DE LA HERRAMIENTA
-# ==========================================
-
+# ---------- spec de herramienta ----------
 TOOL_SPEC = {
     "name": "wikipedia_tool",
-    "description": "Busca artículos en Wikipedia y devuelve texto relevante en el idioma especificado.",
+    "description": "Busca artículos en Wikipedia y devuelve texto relevante.",
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Tema o pregunta a buscar"},
-            "lang": {"type": "string", "description": "Código de idioma (es, en, fr, etc.)"},
-            "top_k": {"type": "integer", "description": "Número de resultados a devolver"},
-            "max_chars": {"type": "integer", "description": "Máximo de caracteres por resultado"},
+            "query": {"type": "string", "description": "Tema a buscar"},
+            "lang": {"type": "string", "description": "Idioma (es, en, fr, ...)", "default": "es"},
+            "top_k": {"type": "integer", "description": "Resultados", "default": 3},
+            "max_chars": {"type": "integer", "description": "Máx. caracteres", "default": 500}
         },
         "required": ["query"]
     }
@@ -80,10 +68,7 @@ TOOL_SPEC = {
 def tool_spec():
     return TOOL_SPEC
 
-# ==========================================
-# INICIO DEL SERVIDOR (para Render o local)
-# ==========================================
-
+# ---------- ejecutar local/render ----------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
