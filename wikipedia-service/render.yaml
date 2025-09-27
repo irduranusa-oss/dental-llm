@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: wikipedia-rag-tool
+    env: docker
+    plan: free
+    autoDeploy: true
+    runtime: docker
+    healthCheckPath: /health
+    envVars:
+      - key: WIKI_LANG
+        value: es
+      - key: CACHE_TTL_SECONDS
+        value: "86400"
+      - key: MAX_CHUNK_CHARS
+        value: "1200"
