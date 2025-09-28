@@ -409,6 +409,7 @@ async def chat_endpoint(body: ChatIn):
     
     lang = body.idioma or detect_lang(q)
     ans = call_openai(q, lang_hint=lang)
+    ans = enrich_with_wikipedia(ans, q) 
     _append_history(q, ans, lang)
     
     return {"respuesta": ans}
