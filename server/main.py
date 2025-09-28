@@ -408,11 +408,18 @@ async def chat_endpoint(body: ChatIn):
         raise HTTPException(status_code=400, detail="Falta 'pregunta'")
     
     lang = body.idioma or detect_lang(q)
-    ans = call_openai(q, lang_hint=lang)
-    ans = enrich_with_wikipedia(ans, q) 
-    _append_history(q, ans, lang)
     
-    return {"respuesta": ans}
+    # 1️⃣ Llamamos al modelo principal
+    answer_text = call_openai(q, lang_hint=lang)
+    
+    # 2️⃣ Intentamos enriquecer con Wikipedia si la respuesta es débil
+    answer_text = enrich_with_wikipedia(answer_text, q)
+    
+    # 3️⃣ Guardamos en historial
+    _append_history(q, answer_text, lang)
+    
+    # 4️⃣ Devolvemos la respuesta
+    return {"respuesta": answer_text}
 
 @app.get("/history")
 def get_history():
