@@ -26,8 +26,18 @@ def enrich_with_wikipedia(answer_text: str, user_query: str) -> str:
         if not user_query:
             return answer_text
 
-        # criterio simple de “respuesta débil”
-        weak = (len(answer_text.strip()) < 60) or ("no estoy seguro" in answer_text.lower())
+                # criterio de “respuesta débil o fuera de alcance”
+        low = answer_text.strip()
+        lower = low.lower()
+        offscope_markers = [
+            "estoy enfocado en temas dentales",
+            "no puedo proporcionar información sobre temas que no sean dentales",
+            "solo temas dentales",
+            "i'm focused on dental topics",
+            "i cannot provide information that is not dental",
+            "only dental topics",
+        ]
+        weak = (len(low) < 120) or any(m in lower for m in offscope_markers)
         if not weak:
             return answer_text
 
