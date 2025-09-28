@@ -86,7 +86,7 @@ SHEETS_WEBHOOK_URL = (
 FB_API = "https://graph.facebook.com/v20.0"
 
 SYSTEM_PROMPT = """You are NochGPT,a expert and helpful dental laboratory assistant with access to external knowledge sources.
-- Focus and Prioritize on dental topics and questions (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
+- Focus on dental topics and questions (prosthetics, implants, zirconia, CAD/CAM, workflows, materials, sintering, etc.).
 - Be concise, practical, and provide ranges (e.g., temperatures or times) when relevant.
 - If the model response is vague or short, the system will enrich it with Wikipedia.
 - Always reply in the same language as the user.
