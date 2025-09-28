@@ -16,6 +16,40 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from openai import OpenAI
 
+# --- Wikipedia helper ---
+def enrich_with_wikipedia(answer_text: str, user_query: str) -> str:
+    """
+    Si la respuesta del LLM es corta/vaga, consulta el servicio Wikipedia y anexa un resumen.
+    No toca nada si falla o no hay resultados.
+    """
+    try:
+        if not user_query:
+            return answer_text
+
+        # criterio simple de “respuesta débil”
+        weak = (len(answer_text.strip()) < 60) or ("no estoy seguro" in answer_text.lower())
+        if not weak:
+            return answer_text
+
+        r = requests.post(
+            f"{WIKIPEDIA_TOOL_URL}/tool",
+            json={"query": user_query, "lang": "es", "top_k": 3, "max_chars": 800},
+            timeout=10,
+        )
+        if r.ok:
+            data = r.json() or {}
+            cands = data.get("candidates") or []
+            if cands:
+                top = cands[0]
+                title = top.get("title", "Wikipedia")
+                snippet = (top.get("snippet") or "").strip()
+                if snippet:
+                    return f"{answer_text}\n\n📚 {title} (Wikipedia): {snippet}"
+    except Exception as e:
+        print("Wikipedia enrich error:", e)
+    return answer_text
+# --- fin helper ---
+
 # Importación condicional para detección de idiomas
 try:
     from langdetect import detect, DetectorFactory, LangDetectException
