@@ -27,7 +27,12 @@ from server.profile_prefix import (
     build_mandatory_profile_prefix,
     compose_profile_first_answer,
 )
-from server.profile_router import build_system_context, detect_intent, detect_relevant_profiles
+from server.profile_router import (
+    build_system_context,
+    detect_intent,
+    detect_relevant_profiles,
+    guess_reply_lang,
+)
 from server.promotional_engine import build_promotional_context
 
 # --- Wikipedia helper ---
@@ -195,7 +200,7 @@ def detect_lang(text: str) -> str:
 
     if LANGDETECT_AVAILABLE:
         try:
-            detected_lang = detect(t)  # ej: 'en','es','pt','fr','ru','ar','hi','zh-cn','zh-tw','ja','ko'
+            detected_lang = detect(t.casefold())  # ej: 'en','es','pt','fr','ru','ar','hi','zh-cn','zh-tw','ja','ko'
             lang_map = {
                 'es': 'es',
                 'en': 'en',
@@ -293,7 +298,7 @@ def generate_answer(question: str, lang: Optional[str] = None) -> str:
     forced Ignacio/NACHGPT prefix.
     """
     q = (question or "").strip()
-    resolved_lang = lang or detect_lang(q)
+    resolved_lang = guess_reply_lang(q, lang or detect_lang(q))
     intents = detect_intent(q)
     loaded = detect_relevant_profiles(q)
     promo = build_promotional_context(q, loaded)

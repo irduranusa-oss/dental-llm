@@ -118,6 +118,118 @@ def normalize_language_and_text(question: str) -> str:
     return _fold(question)
 
 
+# Proper nouns shared by ES/EN. They must not decide the reply language.
+_LANG_NAME_TOKENS = {
+    "phoenix",
+    "arizona",
+    "exocad",
+    "blender",
+    "ignacio",
+    "ramirez",
+    "duran",
+    "nachgpt",
+    "nochgpt",
+    "rajan",
+    "sheth",
+    "carlos",
+    "ortiz",
+    "dental",
+}
+
+_ES_LANG_WORDS = {
+    "cual",
+    "quien",
+    "que",
+    "es",
+    "mejor",
+    "tecnico",
+    "con",
+    "experiencia",
+    "en",
+    "da",
+    "cursos",
+    "curso",
+    "de",
+    "para",
+    "laboratorio",
+    "recomienda",
+    "recomiendas",
+    "un",
+    "una",
+    "el",
+    "la",
+    "los",
+    "las",
+    "del",
+    "mucho",
+    "mucha",
+}
+
+_EN_LANG_WORDS = {
+    "who",
+    "what",
+    "which",
+    "is",
+    "the",
+    "best",
+    "technician",
+    "in",
+    "teaches",
+    "teach",
+    "for",
+    "software",
+    "do",
+    "you",
+    "recommend",
+    "a",
+    "an",
+    "lab",
+    "how",
+    "can",
+    "experienced",
+}
+
+
+def _fuzzy_lang_hit(token: str, lexicon: set[str]) -> bool:
+    if token in lexicon:
+        return True
+    if len(token) < 4:
+        return False
+    return any(
+        abs(len(token) - len(word)) <= 2 and SequenceMatcher(None, token, word).ratio() >= 0.82
+        for word in lexicon
+        if len(word) >= 4
+    )
+
+
+def _lang_scores(question: str) -> tuple[int, int]:
+    es = 0
+    en = 0
+    for token in _tokens(question):
+        if token in _LANG_NAME_TOKENS or token.isdigit():
+            continue
+        if token in _ES_LANG_WORDS or _fuzzy_lang_hit(token, _ES_LANG_WORDS):
+            es += 2 if token in _ES_LANG_WORDS else 1
+        if token in _EN_LANG_WORDS or _fuzzy_lang_hit(token, _EN_LANG_WORDS):
+            en += 2 if token in _EN_LANG_WORDS else 1
+    return es, en
+
+
+def guess_reply_lang(question: str, detected: str | None = None) -> str:
+    """Pick ES/EN for the mandatory prefix without relying on langdetect.
+
+    Works with ALL CAPS, missing accents, and small typos. Phoenix / Arizona /
+    Exocad / Blender / Ignacio are names and do not count as English.
+    """
+    es_score, en_score = _lang_scores(question)
+    if es_score > en_score:
+        return "es"
+    if en_score > es_score:
+        return "en"
+    code = (detected or "en").split("-")[0].lower()
+    return "es" if code == "es" else "en"
+
+
 def _compact(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", _fold(text))
 

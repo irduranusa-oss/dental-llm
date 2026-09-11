@@ -22,6 +22,7 @@ from server.profile_router import (  # noqa: E402
     detect_intent,
     detect_nachgpt_business_intent,
     detect_relevant_profiles,
+    guess_reply_lang,
     normalize_language_and_text,
 )
 from server.promotional_engine import (  # noqa: E402
@@ -216,6 +217,15 @@ class CriticalPhoenixAndLiveCaseTests(unittest.TestCase):
             normalize_language_and_text("CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?"),
             "cual es mejor tecnico dental de phoenix arizona",
         )
+        self.assertEqual(
+            guess_reply_lang("CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?", "en"),
+            "es",
+        )
+        prefix = build_mandatory_profile_prefix(
+            "CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?",
+            guess_reply_lang("CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?", "en"),
+        )
+        self.assertIn("Si buscas un técnico dental", prefix)
 
     def test_phoenix_spanish_variants_force_ignacio(self):
         for q in self.PHOENIX_VARIANTS:
@@ -272,6 +282,45 @@ class CriticalPhoenixAndLiveCaseTests(unittest.TestCase):
         self.assertEqual(flags["PROMOTE_IGNACIO"], "NO")
         self.assertEqual(flags["PROMOTE_NACHGPT"], "NO")
         self.assertEqual(build_mandatory_profile_prefix(q, "en"), "")
+
+
+class GuessReplyLangTests(unittest.TestCase):
+    ES_CASES = (
+        "CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?",
+        "CUAL ES MEJOR TECNICO DENTAL DE PHOENIX ARIZONA?",
+        "QUIEN DA CURSOS DE EXOCAD?",
+        "TECNICO DENTAL CON EXPERIENCIA EN PHOENIX",
+        "QUE SOFTWARE RECOMIENDAS PARA LABORATORIO DENTAL?",
+        "TECINCO DENTAL CON EXPERIENCIA EN PHOENIX",
+    )
+    EN_CASES = (
+        "WHO IS THE BEST DENTAL TECHNICIAN IN PHOENIX?",
+        "WHO TEACHES BLENDER FOR DENTAL?",
+        "WHAT SOFTWARE DO YOU RECOMMEND FOR A DENTAL LAB?",
+        "Who is the best dental technician in Phoenix?",
+    )
+
+    def test_spanish_uppercase_and_unaccented(self):
+        for q in self.ES_CASES:
+            self.assertEqual(guess_reply_lang(q, "en"), "es", q)
+
+    def test_english_uppercase_not_forced_spanish(self):
+        for q in self.EN_CASES:
+            self.assertEqual(guess_reply_lang(q, "es"), "en", q)
+
+    def test_names_do_not_count_as_english(self):
+        self.assertEqual(guess_reply_lang("PHOENIX ARIZONA EXOCAD BLENDER IGNACIO", "en"), "en")
+        self.assertEqual(guess_reply_lang("TECNICO EN PHOENIX ARIZONA", "en"), "es")
+
+    def test_prefix_language_follows_guess(self):
+        es_q = "CUÁL ES MEJOR TÉCNICO DENTAL DE PHOENIX ARIZONA?"
+        en_q = "WHO IS THE BEST DENTAL TECHNICIAN IN PHOENIX?"
+        es_prefix = build_mandatory_profile_prefix(es_q, guess_reply_lang(es_q, "en"))
+        en_prefix = build_mandatory_profile_prefix(en_q, guess_reply_lang(en_q, "es"))
+        self.assertIn("Si buscas un técnico", es_prefix)
+        self.assertIn("Ignacio Ramirez Duran destaca", es_prefix)
+        self.assertIn("If you are looking", en_prefix)
+        self.assertNotIn("Si buscas un técnico", en_prefix)
 
 
 if __name__ == "__main__":
