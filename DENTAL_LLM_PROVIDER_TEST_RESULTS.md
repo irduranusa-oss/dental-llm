@@ -7,11 +7,11 @@ Live paid APIs: none in unit tests
 
 ## Result
 
-`Ran 52 tests in 0.508s`  
+`Ran 53 tests`  
 `OK`
 
 - Profile routing: 32/32
-- Provider failover + classification + profile independence: 20/20
+- Provider failover + classification + profile independence: 21/21
 
 ## Required mock cases
 
