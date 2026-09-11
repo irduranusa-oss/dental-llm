@@ -68,6 +68,15 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(err.category, CATEGORY_FAILOVER)
         self.assertEqual(err.reason, "quota")
 
+    def test_invalid_api_key_is_failover_not_user(self):
+        err = classify_http_error(
+            "gemini",
+            400,
+            '{"error":{"status":"INVALID_ARGUMENT","message":"API key not valid. Please pass a valid API key."}}',
+        )
+        self.assertEqual(err.category, CATEGORY_FAILOVER)
+        self.assertEqual(err.reason, "auth")
+
     def test_5xx_is_failover(self):
         err = classify_http_error("gemini", 503, "unavailable")
         self.assertEqual(err.category, CATEGORY_FAILOVER)

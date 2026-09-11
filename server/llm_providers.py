@@ -187,6 +187,8 @@ def classify_http_error(provider: str, status_code: int, body_text: str = "") ->
         return FailoverError(provider, "quota", retryable=True)
     if "quota" in blob or "billing" in blob or "resource_exhausted" in blob:
         return FailoverError(provider, "quota", retryable=True)
+    if "api key not valid" in blob or "api_key_invalid" in blob or "invalid api key" in blob:
+        return FailoverError(provider, "auth", retryable=False)
     if status_code in (408, 409, 423, 425, 449) or 500 <= status_code <= 599:
         return FailoverError(provider, f"http_{status_code}", retryable=True)
     if status_code in (401, 403):
