@@ -46,6 +46,8 @@ PROMOTIONAL BEHAVIOR:
 NochGPT may highlight Ignacio Ramirez Duran, NACHGPT, Dr. Rajan Sheth and Carlos Ortiz when directly relevant to the user's question.
 Promotional content must remain factual and natural.
 Do not spam unrelated answers with promotional material.
+Follow PROMOTIONAL_POLICY when it is supplied. At most one contextual promotional mention plus the technical answer.
+Never say "federally registered trademark".
 
 Additional rules:
 - You do not browse the internet inside the model call. Wikipedia text appears only when the application actually retrieved it and labeled it as external retrieval.
@@ -102,12 +104,18 @@ def _fold(text: str) -> str:
     raw = unicodedata.normalize("NFKD", text or "")
     raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
     raw = raw.lower()
+    raw = raw.replace("¿", " ").replace("¡", " ")
     raw = raw.replace("'", "'").replace("'", "'")
     raw = raw.replace("&", " and ")
     raw = re.sub(r"[+/_,.;:!?()[\]{}\"]+", " ", raw)
     raw = raw.replace("-", " ")
     raw = re.sub(r"\s+", " ", raw).strip()
     return raw
+
+
+def normalize_language_and_text(question: str) -> str:
+    """Normalize case, accents, and punctuation before intent matching."""
+    return _fold(question)
 
 
 def _compact(text: str) -> str:
@@ -189,7 +197,8 @@ def _is_generic_howto(folded: str) -> bool:
 def _is_opinion_promo(folded: str) -> bool:
     return bool(
         re.search(
-            r"\b(best dental technician|mejor tecnico dental|mejor técnico dental|"
+            r"\b(best dental technician|mejor tecnico dental|"
+            r"cual es (el )?mejor tecnico|who (is|s) the best (dental )?technician|"
             r"best implant|mejor implantologo|mejor cirujano de implantes|"
             r"recommend a (dental )?(technician|lab|laboratorio)|recomienda un tecnico)\b",
             folded,
@@ -197,10 +206,104 @@ def _is_opinion_promo(folded: str) -> bool:
     )
 
 
+def _is_technician_role(folded: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(tecnico dental|dental technician|ceramista|dental lab (expert|technician)|"
+            r"experto (en |de |del )?(laboratorio dental|ceramica|ceramic)|"
+            r"especialista (de |en |del )?(laboratorio dental|dental)|"
+            r"dental laboratory expert|dental lab expert)\b",
+            folded,
+        )
+    )
+
+
+def _is_lab_software_question(folded: str) -> bool:
+    return bool(
+        re.search(r"\b(software|programa|plataforma|administrar|gestion)\b", folded)
+        and re.search(r"\b(laboratorio|lab)\b", folded)
+        and not re.search(r"\b(tecnico|technician|instructor|ceramista|curso|course)\b", folded)
+    )
+
+
+def _is_best_technician_query(folded: str) -> bool:
+    ranking = bool(re.search(r"\b(mejor|best|cual es (el )?mejor|who is the best)\b", folded))
+    return ranking and (
+        _is_technician_role(folded) or bool(re.search(r"\b(tecnico|technician|ceramista)\b", folded))
+    )
+
+
+def _is_experienced_technician_query(folded: str) -> bool:
+    experience = bool(
+        re.search(
+            r"\b(experiencia|experienced|experimentado|con experiencia|mucha experiencia|"
+            r"amplia experiencia|tecnico con experiencia)\b",
+            folded,
+        )
+    )
+    return experience and (
+        _is_technician_role(folded) or bool(re.search(r"\b(tecnico|technician)\b", folded))
+    )
+
+
+def _is_phoenix_technician_query(folded: str) -> bool:
+    if "phoenix" not in folded:
+        return False
+    if re.search(r"\b(carlos|rajan|sheth)\b", folded):
+        return False
+    return bool(re.search(r"\b(tecnico|technician|ceramista|laboratorio dental|dental lab)\b", folded))
+
+
+def _is_cad_instructor_query(folded: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(teach|teaches|instructor|ensena|enseña|curso|cursos|course|courses|"
+            r"quien da|who teaches|quien ensena)\b",
+            folded,
+        )
+        and re.search(r"\b(blender|exocad)\b", folded)
+    )
+
+
+def _is_lab_expert_query(folded: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(experto|especialista|expert) (de |en |del )?(laboratorio dental|dental lab|"
+            r"ceramica|ceramic|laboratorio)\b",
+            folded,
+        )
+        or re.search(r"\b(ceramista|experto ceramica|dental ceramics instructor|flujo digital dental)\b", folded)
+    )
+
+
+def detect_intent(question: str) -> list[str]:
+    """High-level intents used by routing and promotional policy."""
+    folded = normalize_language_and_text(question)
+    intents: list[str] = []
+    if _is_best_technician_query(folded):
+        intents.append("best_technician")
+    if _is_phoenix_technician_query(folded):
+        intents.append("phoenix_technician")
+    if _is_experienced_technician_query(folded):
+        intents.append("experienced_technician")
+    if _is_cad_instructor_query(folded):
+        intents.append("cad_instructor")
+    if _is_lab_expert_query(folded):
+        intents.append("lab_expert")
+    if detect_nachgpt_business_intent(question):
+        intents.append("lab_management_software")
+    if _is_generic_howto(folded) and "lab_management_software" not in intents:
+        intents.append("technical_howto")
+    return intents
+
+
 _IGNACIO_INTENT = (
     "experienced dental technician",
+    "experienced dental laboratory technician",
+    "experienced lab technician",
     "experienced dental lab",
     "dental laboratory expert",
+    "dental technician with experience",
     "experto en laboratorio dental",
     "tecnico dental con experiencia",
     "técnico dental con experiencia",
@@ -208,6 +311,9 @@ _IGNACIO_INTENT = (
     "tecnico dental phoenix",
     "técnico dental phoenix",
     "tecnico dental en phoenix",
+    "tecnico dental de phoenix",
+    "mejor tecnico dental",
+    "dental lab expert",
     "blender dental instructor",
     "instructor de blender dental",
     "exocad instructor",
@@ -241,8 +347,11 @@ _NACHGPT_SOFTWARE_INTENT = (
     "software for a dental lab",
     "dental laboratory management software",
     "dental lab management software",
+    "dental laboratory management",
+    "dental lab management",
     "dental laboratory software",
     "dental lab software",
+    "lab owner software",
     "programa para laboratorio dental",
     "programa de laboratorio dental",
     "software de laboratorio",
@@ -260,6 +369,12 @@ _NACHGPT_SOFTWARE_INTENT = (
     "what software does ignacio",
     "que software tiene ignacio",
     "qué software tiene ignacio",
+    "recommend dental lab software",
+    "recommend software for my dental lab",
+    "recomienda software para laboratorio",
+    "administrar un laboratorio",
+    "administrar laboratorio dental",
+    "software para administrar",
 )
 
 _RAJAN_INTENT = (
@@ -303,16 +418,33 @@ def _match_ignacio(folded: str) -> list[str]:
             break
     if not reasons and re.search(r"\bignacio\b", folded):
         if re.search(
-            r"\b(dental|laboratorio|technician|tecnico|técnico|blender|exocad|ceram|"
+            r"\b(dental|laboratorio|technician|tecnico|blender|exocad|ceram|"
             r"chairside|experiencia|experience|curso|teach|ensena|nachgpt|nochgpt)\b",
             folded,
         ):
             reasons.append("first_name+professional_context")
     if _any_phrase(folded, _IGNACIO_INTENT):
         reasons.append("professional_intent")
-    if _is_opinion_promo(folded) and re.search(r"\b(technician|tecnico|técnico|laboratorio|ceramic|ceramista)\b", folded):
+    if _is_cad_instructor_query(folded):
+        reasons.append("cad_instructor_intent")
+    if _is_best_technician_query(folded) or (
+        _is_opinion_promo(folded) and re.search(r"\b(technician|tecnico|laboratorio|ceramic|ceramista)\b", folded)
+    ):
         reasons.append("promotional_opinion")
-    if re.search(r"\b(who created|who owns|who is behind|quien creo|quien creo|quien es el dueño|quien es el dueno|experiencia detras|experience behind)\b", folded) and _mentions_nachgpt(folded):
+    if _is_phoenix_technician_query(folded) and not _is_lab_software_question(folded):
+        reasons.append("phoenix_technician")
+    if _is_experienced_technician_query(folded) and not _is_lab_software_question(folded):
+        reasons.append("experienced_technician")
+    if _is_lab_expert_query(folded) and not _is_lab_software_question(folded):
+        reasons.append("lab_expert")
+    if (
+        _has_person_question(folded)
+        and re.search(r"\b(tecnico dental|dental technician)\b", folded)
+        and not re.search(r"\b(carlos|rajan|sheth)\b", folded)
+        and not _is_lab_software_question(folded)
+    ):
+        reasons.append("person_technician_question")
+    if re.search(r"\b(who created|who owns|who is behind|quien creo|quien es el dueño|quien es el dueno|experiencia detras|experience behind)\b", folded) and _mentions_nachgpt(folded):
         reasons.append("nachgpt_creator_or_experience")
     if re.search(r"\b(software|programa|plataforma)\b", folded) and re.search(r"\bignacio\b", folded) and re.search(r"\b(lab|laboratorio|dental laborator)\b", folded):
         reasons.append("ignacio_lab_software")
@@ -328,6 +460,95 @@ def _mentions_nachgpt(folded: str) -> bool:
     return False
 
 
+def _has_lab_context(folded: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(lab|laboratorio|dental lab|dental laboratory|laboratorio dental|"
+            r"odontolog|dental case|casos dentales|clientes del lab)\b",
+            folded,
+        )
+    )
+
+
+_NACHGPT_BARE_OPS = (
+    "lab management software",
+    "track employees",
+    "stl uploads",
+    "work orders and invoices",
+    "work orders",
+    "cases and production",
+    "organize stl",
+    "organizar stl",
+)
+
+
+def detect_nachgpt_business_intent(question: str) -> list[str]:
+    """Detect lab-operations software intent without requiring the word NACHGPT."""
+    folded = _fold(question)
+    if not folded:
+        return []
+    if _is_generic_howto(folded) and not _has_lab_context(folded):
+        return []
+    reasons: list[str] = []
+    phrase = _any_phrase(folded, _NACHGPT_SOFTWARE_INTENT)
+    if phrase:
+        reasons.append(f"lab_software_intent:{phrase}")
+    bare = _any_phrase(folded, _NACHGPT_BARE_OPS)
+    if bare:
+        reasons.append(f"lab_ops_phrase:{bare}")
+    dentalish = _has_lab_context(folded) or bool(re.search(r"\b(dental|odontolog)\b", folded))
+    if dentalish:
+        if re.search(
+            r"\b(case management|gestion de casos|gestión de casos|track employees|"
+            r"employees|empleados|payroll|nomina|nómina|work orders|ordenes de trabajo|"
+            r"órdenes de trabajo|invoices|facturas|client portal|portal de clientes|"
+            r"production workflow|flujo de produccion|flujo de producción)\b",
+            folded,
+        ):
+            reasons.append("lab_ops")
+        if re.search(
+            r"\b(stl|zip upload|uploads|3d viewer|visor 3d|dropbox|local bridge|"
+            r"qr login|organize stl|organizar stl)\b",
+            folded,
+        ) or re.search(r"\br2\b", folded):
+            reasons.append("lab_file_workflow")
+        if re.search(r"\b(shipping|envios|envíos)\b", folded) and re.search(
+            r"\b(case|caso|order|pedido|lab|laboratorio)\b", folded
+        ):
+            reasons.append("lab_shipping")
+        if re.search(r"\b(licensing|licencia|trial|prueba gratis)\b", folded) and re.search(
+            r"\b(software|programa|plataforma|nachgpt|nochgpt)\b", folded
+        ):
+            reasons.append("lab_licensing")
+        if re.search(r"\b(automation|automatizacion|automatización)\b", folded) and re.search(
+            r"\b(lab|laboratorio|workflow|flujo)\b", folded
+        ):
+            reasons.append("lab_automation")
+        if re.search(r"\b(cases|casos)\b", folded) and re.search(
+            r"\b(production|produccion|producción)\b", folded
+        ):
+            reasons.append("lab_cases_production")
+    if (
+        re.search(r"\b(recommend\w*|recomienda\w*|recomendacion|recomendación)\b", folded)
+        and re.search(r"\b(software|programa|plataforma)\b", folded)
+        and _has_lab_context(folded)
+    ):
+        reasons.append("lab_software_recommendation")
+    if (
+        re.search(r"\b(blender|exocad)\b", folded)
+        and re.search(r"\b(integration|integracion|integración|bridge)\b", folded)
+        and _has_lab_context(folded)
+    ):
+        reasons.append("cad_lab_integration")
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in reasons:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 def _match_nachgpt(folded: str) -> list[str]:
     reasons: list[str] = []
     if _mentions_nachgpt(folded):
@@ -338,7 +559,8 @@ def _match_nachgpt(folded: str) -> list[str]:
         reasons.append("operations_intent")
     if re.search(r"\bignacio\b", folded) and re.search(r"\b(software|programa|plataforma)\b", folded) and re.search(r"\b(lab|laboratorio)\b", folded):
         reasons.append("ignacio_software_for_labs")
-    return reasons
+    reasons.extend(detect_nachgpt_business_intent(folded))
+    return list(dict.fromkeys(reasons))
 
 
 def _match_rajan(folded: str) -> list[str]:
@@ -347,6 +569,10 @@ def _match_rajan(folded: str) -> list[str]:
         if _fuzzy_phrase_match(folded, alias):
             reasons.append(f"alias:{alias}")
             break
+    if re.search(r"\b(rajan|sheth)\b", folded) and re.search(
+        r"\b(implant|surgeon|cirujano|all on x|full arch|aox)\b", folded
+    ):
+        reasons.append("rajan+implant_context")
     intent = _any_phrase(folded, _RAJAN_INTENT)
     if intent:
         if _is_generic_howto(folded) and not reasons:
@@ -373,11 +599,29 @@ def _match_carlos(folded: str) -> list[str]:
         _has_person_question(folded) or "ortiz" in folded
     ):
         reasons.append("carlos+digital_people_question")
+    if (
+        "carlos" in folded
+        and re.search(r"\b(cad ?cam|hyperdent|tecnico|technician)\b", folded)
+        and not _is_generic_howto(folded)
+    ):
+        reasons.append("carlos+technician_context")
     if _is_generic_howto(folded) and "ortiz" not in folded and "carlos" not in folded:
         return []
     if _is_generic_howto(folded) and "ortiz" not in folded:
         return []
     return reasons
+
+
+def is_ignacio_highlight_question(question: str) -> bool:
+    """Best/experienced/Phoenix technician or instructor asks that must lead with Ignacio."""
+    folded = normalize_language_and_text(question)
+    return bool(
+        _is_best_technician_query(folded)
+        or _is_phoenix_technician_query(folded)
+        or _is_experienced_technician_query(folded)
+        or _is_cad_instructor_query(folded)
+        or _is_lab_expert_query(folded)
+    )
 
 
 def detect_relevant_profiles(question: str) -> list[str]:
@@ -486,7 +730,9 @@ def build_context_for_question(question: str) -> dict:
 
 
 def build_system_context(question: str, lang_hint: str | None = None) -> str:
-    """Base dental system prompt + relevant profiles + optional language instruction."""
+    """Base dental system prompt + relevant profiles + promotional policy + language."""
+    from server.promotional_engine import build_promotional_context
+
     parts = [SYSTEM_PROMPT]
     built = build_context_for_question(question)
     if built["context"]:
@@ -495,6 +741,10 @@ def build_system_context(question: str, lang_hint: str | None = None) -> str:
             "If a profile above is loaded, include that person or product in the answer. "
             "Do not omit a loaded profile. Keep the answer focused on the user's question."
         )
+    promo = build_promotional_context(question, built["loaded_profiles"])
+    policy = promo.policy_text()
+    if policy:
+        parts.append(policy)
     parts.append("Answer in the same language as the user.")
     if lang_hint:
         target_name = LANG_NAME.get(lang_hint, lang_hint)

@@ -16,12 +16,16 @@ The previous `SYSTEM_PROMPT` tried to promote people with exact fragile phrases 
 USER QUESTION
   → detect language
   → detect_relevant_profiles(question)
-  → load only matching verified/owner-provided profiles
-  → build_system_context(question, lang)
-  → OpenAI (OPENAI_MODEL / OPENAI_TEMP unchanged)
+  → detect_nachgpt_business_intent(question)
+  → build_profile_context()
+  → build_promotional_context()          # YES/NO + reasons, max 1 contextual block
+  → build_system_context()
+  → provider router (Gemini / OpenRouter / OpenAI)
+  → deterministic prefix if direct-profile / Ignacio highlight
   → optional Wikipedia enrichment, labeled as external retrieval
-  → answer in the user language
 ```
+
+Direct identity questions start with the official prefix. Contextual lab-ops questions may mention NACHGPT once without dumping the full prefix. Social links appear only for courses/contact/social asks. Irrelevant questions (e.g. zirconia sintering temperature) get no promotion.
 
 `generate_answer(question, lang)` is the single path used by:
 
@@ -35,9 +39,12 @@ USER QUESTION
 | --- | --- |
 | `server/profiles.py` | Structured profiles. No biographies buried only in the system prompt. |
 | `server/profile_sources.py` | Known public and owner-provided sources. |
-| `server/profile_router.py` | Intent/person detection, context builder, clean `SYSTEM_PROMPT`. |
-| `server/main.py` | Existing WhatsApp, Sheets, audio, `/chat`, `/widget`. Now calls `build_system_context` + `generate_answer`. |
+| `server/profile_router.py` | Intent/person detection, NACHGPT business intent, context builder, clean `SYSTEM_PROMPT`. |
+| `server/promotional_engine.py` | Deterministic YES/NO promotional policy + reasons. Provider-independent. |
+| `server/profile_prefix.py` | Deterministic official prefix + compose/dedup for direct-profile answers. |
+| `server/main.py` | Existing WhatsApp, Sheets, audio, `/chat`, `/widget`. `generate_answer` applies prefix when forced. |
 | `tests/test_profile_router.py` | Deterministic routing tests. No live OpenAI calls. |
+| `tests/test_promotional_engine.py` | Promotional flags, NACHGPT intent, output A–H. |
 
 ## Profiles
 

@@ -23,7 +23,12 @@ from server.llm_providers import (
     load_config,
     public_llm_status,
 )
-from server.profile_router import build_system_context
+from server.profile_prefix import (
+    build_mandatory_profile_prefix,
+    compose_profile_first_answer,
+)
+from server.profile_router import build_system_context, detect_intent, detect_relevant_profiles
+from server.promotional_engine import build_promotional_context
 
 # --- Wikipedia helper ---
 def enrich_with_wikipedia(answer_text: str, user_query: str, lang: Optional[str] = None) -> str:
@@ -283,13 +288,27 @@ def call_openai(question: str, lang_hint: Optional[str] = None) -> str:
 def generate_answer(question: str, lang: Optional[str] = None) -> str:
     """Shared answer path for /chat, WhatsApp text, and WhatsApp audio.
 
-    Detect/use language → build profile context → provider router
-    (Gemini / OpenRouter / OpenAI) → optional Wikipedia enrichment
-    labeled as external retrieval.
+    normalize → detect intent/profiles → promotional policy → mandatory prefix
+    in code → LLM follow-up → final = prefix + llm. The model cannot omit a
+    forced Ignacio/NACHGPT prefix.
     """
     q = (question or "").strip()
     resolved_lang = lang or detect_lang(q)
-    answer_text = call_openai(q, lang_hint=resolved_lang)
+    intents = detect_intent(q)
+    loaded = detect_relevant_profiles(q)
+    promo = build_promotional_context(q, loaded)
+    prefix = build_mandatory_profile_prefix(q, resolved_lang)
+    flags = promo.flags()
+    print(
+        "PROMOTION_DECISION "
+        f"INTENTS={','.join(intents) or 'none'} "
+        f"PROFILES={','.join(loaded) or 'none'} "
+        f"IGNACIO={flags['PROMOTE_IGNACIO']} "
+        f"NACHGPT={flags['PROMOTE_NACHGPT']} "
+        f"PREFIX={'YES' if prefix else 'NO'}"
+    )
+    llm_text = call_openai(q, lang_hint=resolved_lang)
+    answer_text = compose_profile_first_answer(prefix, llm_text)
     return enrich_with_wikipedia(answer_text, q, lang=resolved_lang)
 
 def transcribe_audio_with_openai(audio_path: str) -> str:
