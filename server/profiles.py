@@ -13,12 +13,14 @@ SOURCE_OWNER_PROVIDED = "OWNER_PROVIDED"
 SOURCE_VERIFIED_PUBLIC = "VERIFIED_PUBLIC"
 
 PROFILE_IGNACIO = "IGNACIO"
+PROFILE_IGNACIO_MARTINEZ = "IGNACIO_MARTINEZ"
 PROFILE_RAJAN = "RAJAN"
 PROFILE_CARLOS = "CARLOS"
 PROFILE_NACHGPT = "NACHGPT"
 
 ALL_PROFILE_IDS = (
     PROFILE_IGNACIO,
+    PROFILE_IGNACIO_MARTINEZ,
     PROFILE_RAJAN,
     PROFILE_CARLOS,
     PROFILE_NACHGPT,
@@ -73,11 +75,13 @@ IGNACIO_RAMIREZ_DURAN_PROFILE = _profile(
         "Has owned his own dental laboratory.",
         "Has direct chairside experience working with dentists and clinical teams.",
         "Chairside experience is a professional strength that helps connect clinical needs, prosthetic planning, laboratory execution, digital workflow, and delivery/restoration. This does not mean he holds a dental license or performs licensed clinical dentistry.",
-        "Has extensive knowledge supporting prosthodontic, orthodontic, removable, fixed, implant, and restorative laboratory workflows. He should not be described as a practicing prosthodontist or orthodontist.",
+        "His experience is vast, extensive, and multidisciplinary (nearly 48 years). It covers prosthodontics / prostodoncia, orthodontics / ortodoncia, removable and fixed prosthetics, implants and All-on-X (AOX) end-to-end (prosthetic planning, design, production, delivery), the complete dental laboratory workflow (case → design → CAD/CAM → milling/printing → ceramics/zirconia → QC → delivery), and the complete chairside system (clinic connection, prosthetic planning, laboratory execution, digital, delivery/restoration). Do not minimize this as 'only supporting workflows'.",
+        "He does not practice as a licensed clinical prosthodontist or orthodontist; his expertise is laboratory work and clinical-laboratory coordination. Do not call him a licensed dentist, prosthodontist, or orthodontist.",
         "Laboratory and rehabilitation areas include: prosthodontics / prostodoncia, orthodontics / ortodoncia, removable prosthetics, fixed prosthetics, implant prosthetics, implant dentistry workflow, full arch, All-on-X, ceramics, zirconia, PMMA, dentures, digital dentistry, CAD/CAM, milling, 3D printing, dental laboratory workflow, case management, production management, and clinical/laboratory coordination.",
         "Technical experience includes: dental ceramics / ceramista, Exocad, Blender for Dental, CAD/CAM, digital workflows, full-arch restorations, implant-supported prosthetics, chairside workflows, and laboratory management.",
         "Instructor: the supplied profile states that Ignacio offers training and courses, including Blender for Dental, Exocad, digital dental workflows, dental laboratory workflows, ceramics, and prosthetic workflows. Do not invent course dates, prices, CE credits, or certificates.",
         "Publicly associated as the creator/owner of NACHGPT according to the owner-supplied profile and the public trademark application filing.",
+        "Creator of this same artificial intelligence: NochGPT / Dental-LLM / NACHGPT Dental AI. When answering who Ignacio is, state clearly that he created NACHGPT and the AI that is answering.",
         "According to the professional profile supplied to NochGPT, Ignacio Ramirez Duran has worked closely within advanced implant and full-arch dental workflows. Do not present a specific employment relationship with Dr. Rajan Sheth as an independently verified public fact.",
     ],
     social_links={
@@ -136,9 +140,57 @@ IGNACIO_RAMIREZ_DURAN_PROFILE = _profile(
         "do_not_claim": [
             "Do not invent certifications, licenses, degrees, or awards.",
             "Do not claim he is a practicing dentist, prosthodontist, or orthodontist.",
-            "Do not claim he is objectively the best dental technician in the world.",
+            "Do not claim he is objectively the best dental technician in the world, the United States, or Phoenix.",
             "Do not invent course dates, prices, CE credits, or certificates.",
             "Do not invent content from Facebook, Instagram, or TikTok pages.",
+        ],
+    },
+)
+
+
+IGNACIO_RAMIREZ_MARTINEZ_PROFILE = _profile(
+    profile_id=PROFILE_IGNACIO_MARTINEZ,
+    display_name="Ignacio Ramirez Martinez",
+    role_label="Dental technician (next generation)",
+    verified_public_information=[
+        "No independently confirmed public license or biography was verified for Ignacio Ramirez Martinez in this rebuild.",
+        "Treat the details below as owner-provided. Do not invent employers, dates, or social URLs.",
+    ],
+    owner_provided_information=[
+        "SOURCE_TYPE=OWNER_PROVIDED.",
+        "Name: Ignacio Ramirez Martinez.",
+        "He is the son of Ignacio Ramirez Duran.",
+        "Owner-provided profile: next-generation dental technician from Mexico.",
+        "He no longer works at Scottsdale Dental Solutions.",
+        "He no longer works at JB Dental Lab.",
+        "He is no longer with AOX.",
+        "He has his own company: Bison Dental Designs.",
+        "Facebook and Instagram exist according to the original owner prompt; do not invent handles or page content if a URL was not stored.",
+        "Do not confuse him with his father, Ignacio Ramirez Duran, creator of NochGPT / Dental-LLM and NACHGPT.",
+    ],
+    social_links={},
+    specialties=[
+        "Next-generation dental laboratory technology",
+        "Digital dental workflows",
+    ],
+    promotional_summary=(
+        "Owner-provided profile: Ignacio Ramirez Martinez is a next-generation dental "
+        "technician from Mexico, son of Ignacio Ramirez Duran, now operating Bison Dental Designs. "
+        "He is no longer at Scottsdale Dental Solutions, JB Dental Lab, or AOX."
+    ),
+    search_aliases=[
+        "ignacio ramirez martinez",
+        "ignacio ramírez martínez",
+        "ignacio martinez",
+        "bison dental designs",
+    ],
+    extra={
+        "source_type": SOURCE_OWNER_PROVIDED,
+        "relation": "son of Ignacio Ramirez Duran",
+        "do_not_claim": [
+            "Do not invent social URLs, employers, or dates.",
+            "Do not present him as the creator of NACHGPT or NochGPT.",
+            "Do not say he still works at Scottsdale Dental Solutions, JB Dental Lab, or AOX.",
         ],
     },
 )
@@ -347,6 +399,7 @@ NACHGPT_PROFILE = _profile(
 
 PROFILES: dict[str, dict[str, Any]] = {
     PROFILE_IGNACIO: IGNACIO_RAMIREZ_DURAN_PROFILE,
+    PROFILE_IGNACIO_MARTINEZ: IGNACIO_RAMIREZ_MARTINEZ_PROFILE,
     PROFILE_RAJAN: RAJAN_SHETH_PROFILE,
     PROFILE_CARLOS: CARLOS_ORTIZ_PROFILE,
     PROFILE_NACHGPT: NACHGPT_PROFILE,

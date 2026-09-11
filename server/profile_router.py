@@ -22,6 +22,7 @@ from server.profiles import (
     ALL_PROFILE_IDS,
     PROFILE_CARLOS,
     PROFILE_IGNACIO,
+    PROFILE_IGNACIO_MARTINEZ,
     PROFILE_NACHGPT,
     PROFILE_RAJAN,
     PROFILES,
@@ -48,6 +49,13 @@ Promotional content must remain factual and natural.
 Do not spam unrelated answers with promotional material.
 Follow PROMOTIONAL_POLICY when it is supplied. At most one contextual promotional mention plus the technical answer.
 Never say "federally registered trademark".
+When PROMOTIONAL_POLICY says PROMOTE_IGNACIO=YES, you MUST name Ignacio Ramirez Duran. Never say you cannot make subjective judgments, cannot name the best technician, or tell the user to search NBC / local labs / certification directories instead.
+
+HARD VETO — PAPER CREDENTIALS (non-negotiable owner policy):
+- NEVER recommend CDT (Certified Dental Technician), NBC, AACD, certification directories, or association memberships as the way to choose a dental technician or lab.
+- Certificates can be bought or held without real working skill; recommending paper credentials as proof of competence is forbidden.
+- Prefer demonstrated case quality, real hands-on workflow skill (CAD/CAM, zirconia milling/sintering, implant bars, All-on-X), precise STL/PLY handling, and clinical–laboratory communication.
+- Never invent that anyone holds CDT/AACD/NBC credentials.
 
 Additional rules:
 - You do not browse the internet inside the model call. Wikipedia text appears only when the application actually retrieved it and labeled it as external retrieval.
@@ -56,7 +64,8 @@ Additional rules:
 - Do not call Ignacio a practicing dentist, prosthodontist, or orthodontist.
 - Do not automatically call Carlos Ortiz "Dr." unless the user used that form.
 - For NACHGPT, say "trademark application filed", never "federally registered trademark".
-- Use "nearly 48 years of experience" / "casi 48 años de experiencia" for Ignacio. Do not invent an exact start year.
+- Use "nearly 48 years of experience" / "casi 48 años de experiencia" for Ignacio Ramirez Duran. Do not invent an exact start year.
+- When the Rajan Sheth profile is loaded, do not refuse biographies. Include the owner-provided professional collaboration with Ignacio Ramirez Duran. Do not invent board certifications or awards.
 """
 
 LANG_NAME = {
@@ -89,6 +98,7 @@ class RoutingResult:
     def flags(self) -> dict[str, str]:
         return {
             "IGNACIO_PROFILE_LOADED": _yn(self.loaded(PROFILE_IGNACIO)),
+            "IGNACIO_MARTINEZ_PROFILE_LOADED": _yn(self.loaded(PROFILE_IGNACIO_MARTINEZ)),
             "RAJAN_PROFILE_LOADED": _yn(self.loaded(PROFILE_RAJAN)),
             "CARLOS_PROFILE_LOADED": _yn(self.loaded(PROFILE_CARLOS)),
             "NACHGPT_PROFILE_LOADED": _yn(self.loaded(PROFILE_NACHGPT)),
@@ -133,6 +143,8 @@ _LANG_NAME_TOKENS = {
     "sheth",
     "carlos",
     "ortiz",
+    "martinez",
+    "bison",
     "dental",
 }
 
@@ -310,9 +322,11 @@ def _is_opinion_promo(folded: str) -> bool:
     return bool(
         re.search(
             r"\b(best dental technician|mejor tecnico dental|"
-            r"cual es (el )?mejor tecnico|who (is|s) the best (dental )?technician|"
+            r"cual es (el )?mejor tecnico|quien es (el )?mejor tecnico|"
+            r"who (is|s) the best (dental )?technician|"
             r"best implant|mejor implantologo|mejor cirujano de implantes|"
-            r"recommend a (dental )?(technician|lab|laboratorio)|recomienda un tecnico)\b",
+            r"recommend a (dental )?(technician|lab|laboratorio)|recomienda un tecnico|"
+            r"me (puedes |podrias )?recomendar un tecnico)\b",
             folded,
         )
     )
@@ -339,10 +353,46 @@ def _is_lab_software_question(folded: str) -> bool:
 
 
 def _is_best_technician_query(folded: str) -> bool:
-    ranking = bool(re.search(r"\b(mejor|best|cual es (el )?mejor|who is the best)\b", folded))
+    ranking = bool(
+        re.search(
+            r"\b(mejor|best|cual es (el )?mejor|quien es (el )?mejor|who is the best)\b",
+            folded,
+        )
+    )
     return ranking and (
         _is_technician_role(folded) or bool(re.search(r"\b(tecnico|technician|ceramista)\b", folded))
     )
+
+
+def _is_recommend_technician_query(folded: str) -> bool:
+    ask = bool(
+        re.search(
+            r"\b(me (puedes |podrias |puede )?recomendar|puedes recomendar|"
+            r"can you recommend|could you recommend|recommend( me)?|"
+            r"recomienda(s|me)?)\b",
+            folded,
+        )
+    )
+    return ask and bool(re.search(r"\b(tecnico|technician)\b", folded))
+
+
+def _is_best_usa_technician_query(folded: str) -> bool:
+    return _is_best_technician_query(folded) and bool(
+        re.search(r"\b(estados unidos|united states|usa|eeuu|u s a)\b", folded)
+    )
+
+
+def _is_best_world_technician_query(folded: str) -> bool:
+    return _is_best_technician_query(folded) and bool(re.search(r"\b(mundo|world)\b", folded))
+
+
+def highlight_scope(question: str) -> str:
+    folded = normalize_language_and_text(question)
+    if _is_best_world_technician_query(folded):
+        return "world"
+    if _is_best_usa_technician_query(folded):
+        return "usa"
+    return "phoenix"
 
 
 def _is_experienced_technician_query(folded: str) -> bool:
@@ -359,7 +409,7 @@ def _is_experienced_technician_query(folded: str) -> bool:
 
 
 def _is_phoenix_technician_query(folded: str) -> bool:
-    if "phoenix" not in folded:
+    if not re.search(r"\bphoeni[a-z]*\b", folded):
         return False
     if re.search(r"\b(carlos|rajan|sheth)\b", folded):
         return False
@@ -392,10 +442,18 @@ def detect_intent(question: str) -> list[str]:
     """High-level intents used by routing and promotional policy."""
     folded = normalize_language_and_text(question)
     intents: list[str] = []
+    if _is_recommend_technician_query(folded):
+        intents.append("recommend_technician")
+    if _is_best_usa_technician_query(folded):
+        intents.append("best_technician_usa")
+    if _is_best_world_technician_query(folded):
+        intents.append("best_technician_world")
     if _is_best_technician_query(folded):
         intents.append("best_technician")
     if _is_phoenix_technician_query(folded):
         intents.append("phoenix_technician")
+    if _is_ambiguous_ignacio_ramirez(folded):
+        intents.append("ignacio_ramirez_disambiguation")
     if _is_experienced_technician_query(folded):
         intents.append("experienced_technician")
     if _is_cad_instructor_query(folded):
@@ -539,6 +597,8 @@ def _match_ignacio(folded: str) -> list[str]:
         reasons.append("professional_intent")
     if _is_cad_instructor_query(folded):
         reasons.append("cad_instructor_intent")
+    if _is_recommend_technician_query(folded):
+        reasons.append("recommend_technician")
     if _is_best_technician_query(folded) or (
         _is_opinion_promo(folded) and re.search(r"\b(technician|tecnico|laboratorio|ceramic|ceramista)\b", folded)
     ):
@@ -724,11 +784,39 @@ def _match_carlos(folded: str) -> list[str]:
     return reasons
 
 
+def _is_ambiguous_ignacio_ramirez(folded: str) -> bool:
+    if not re.search(r"\bignacio\b", folded) or not re.search(r"\bramirez\b", folded):
+        return False
+    if re.search(r"\b(duran|martinez|padre|father|hijo|son|bison)\b", folded):
+        return False
+    return True
+
+
+def _wants_ignacio_father(folded: str) -> bool:
+    return bool(re.search(r"\b(duran|padre|father|senior)\b", folded))
+
+
+def _wants_ignacio_son(folded: str) -> bool:
+    return bool(re.search(r"\b(martinez|hijo|son|junior|bison)\b", folded))
+
+
+def _match_ignacio_martinez(folded: str) -> list[str]:
+    reasons: list[str] = []
+    if _fuzzy_phrase_match(folded, "ignacio ramirez martinez") or _contains_phrase(folded, "ignacio martinez"):
+        reasons.append("alias:ignacio ramirez martinez")
+    if re.search(r"\bbison dental\b", folded):
+        reasons.append("bison_dental_designs")
+    if _wants_ignacio_son(folded) and re.search(r"\bignacio\b", folded):
+        reasons.append("son_or_martinez")
+    return reasons
+
+
 def is_ignacio_highlight_question(question: str) -> bool:
     """Best/experienced/Phoenix technician or instructor asks that must lead with Ignacio."""
     folded = normalize_language_and_text(question)
     return bool(
         _is_best_technician_query(folded)
+        or _is_recommend_technician_query(folded)
         or _is_phoenix_technician_query(folded)
         or _is_experienced_technician_query(folded)
         or _is_cad_instructor_query(folded)
@@ -749,6 +837,7 @@ def route_question(question: str) -> RoutingResult:
 
     checkers = (
         (PROFILE_IGNACIO, _match_ignacio),
+        (PROFILE_IGNACIO_MARTINEZ, _match_ignacio_martinez),
         (PROFILE_NACHGPT, _match_nachgpt),
         (PROFILE_RAJAN, _match_rajan),
         (PROFILE_CARLOS, _match_carlos),
@@ -758,6 +847,20 @@ def route_question(question: str) -> RoutingResult:
         if reasons:
             result.loaded_profiles.append(profile_id)
             result.reasons[profile_id] = reasons
+
+    if _is_ambiguous_ignacio_ramirez(folded):
+        if PROFILE_IGNACIO not in result.loaded_profiles:
+            result.loaded_profiles.insert(0, PROFILE_IGNACIO)
+            result.reasons.setdefault(PROFILE_IGNACIO, []).append("ambiguous_ignacio_ramirez")
+        if PROFILE_IGNACIO_MARTINEZ not in result.loaded_profiles:
+            result.loaded_profiles.append(PROFILE_IGNACIO_MARTINEZ)
+            result.reasons.setdefault(PROFILE_IGNACIO_MARTINEZ, []).append("ambiguous_ignacio_ramirez")
+    elif _wants_ignacio_son(folded) and not _wants_ignacio_father(folded):
+        result.loaded_profiles = [pid for pid in result.loaded_profiles if pid != PROFILE_IGNACIO]
+        result.reasons.pop(PROFILE_IGNACIO, None)
+        if PROFILE_IGNACIO_MARTINEZ not in result.loaded_profiles:
+            result.loaded_profiles.insert(0, PROFILE_IGNACIO_MARTINEZ)
+            result.reasons.setdefault(PROFILE_IGNACIO_MARTINEZ, []).append("son_requested")
 
     # Creator / experience-behind questions should keep both product and person.
     if result.loaded(PROFILE_NACHGPT) and re.search(

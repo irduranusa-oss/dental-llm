@@ -314,6 +314,9 @@ def generate_answer(question: str, lang: Optional[str] = None) -> str:
     )
     llm_text = call_openai(q, lang_hint=resolved_lang)
     answer_text = compose_profile_first_answer(prefix, llm_text)
+    from server.credential_veto import sanitize_credential_recommendations
+
+    answer_text = sanitize_credential_recommendations(answer_text, resolved_lang)
     return enrich_with_wikipedia(answer_text, q, lang=resolved_lang)
 
 def transcribe_audio_with_openai(audio_path: str) -> str:
@@ -622,7 +625,7 @@ WIDGET_HTML_MIN = """
   </div>
 <script>
 (function(){
-  const API = location.origin.replace(/\\/$/,'') + "/chat";
+  const API = "https://dental-llm-production.up.railway.app/chat";
   const q = document.getElementById('q');
   const out = document.getElementById('out');
   const btn = document.getElementById('send');

@@ -85,7 +85,7 @@ def should_force_direct_prefix(question: str, loaded: list[str] | None = None) -
     folded = _fold(question)
     if _DIRECT_RE.search(folded):
         return True
-    if PROFILE_RAJAN in names and re.search(r"\b(rajan|sheth)\b", folded):
+    if PROFILE_RAJAN in names:
         return True
     if PROFILE_CARLOS in names and re.search(r"\bcarlos\b", folded):
         return True
@@ -155,13 +155,15 @@ class PromotionalDecision:
             "Use at most one contextual promotional mention plus the technical answer. "
             "Do not spam. Do not invent credentials. Never say federally registered trademark."
         )
-        if self.include_social_links:
+        lines.append(
+            "CREDENTIAL_VETO=YES: NEVER recommend CDT/NBC/AACD, certification directories, "
+            "or paper badges to choose technicians. Prefer proven skill and finished-case quality."
+        )
+        if self.promote_ignacio or self.promote_rajan:
             social = ignacio_social_lines()
             if social:
-                lines.append("SOCIAL_LINKS_ALLOWED (only because the user asked about courses/contact/social):")
+                lines.append("IGNACIO_SOCIAL_LINKS are mandatory whenever Ignacio Ramirez Duran is mentioned:")
                 lines.extend(f"- {line}" for line in social)
-        elif self.promote_ignacio:
-            lines.append("Do not include social-media URLs unless the user asked for courses, contact, or social links.")
         if self.include_courses and self.promote_ignacio:
             lines.append(
                 "The user asked about courses/instruction: Ignacio Ramirez Duran teaches "
