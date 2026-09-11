@@ -152,8 +152,9 @@ app.add_middleware(
 
 if not OPENAI_API_KEY:
     print("⚠️ Falta OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+    client = None
+else:
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 if not SHEETS_WEBHOOK_URL:
     print("⚠️ Falta SHEET_WEBHOOK / SHEETS_WEBHOOK_URL en variables de entorno")
@@ -222,6 +223,12 @@ def call_openai(question: str, lang_hint: Optional[str] = None) -> str:
     """Llama al modelo forzando el idioma del usuario (incluye ja/ko) y traduce si es necesario."""
     sys = build_system_context(question, lang_hint=lang_hint)
 
+    if client is None:
+        return {
+            "es": "Lo siento, el modelo no está configurado.",
+            "en": "Sorry, the model is not configured.",
+        }.get(lang_hint or "", "Sorry, the model is not configured.")
+
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -281,6 +288,8 @@ def generate_answer(question: str, lang: Optional[str] = None) -> str:
 
 def transcribe_audio_with_openai(audio_path: str) -> str:
     """Transcribe audio usando Whisper o GPT-4o-mini-transcribe"""
+    if client is None:
+        return ""
     try:
         with open(audio_path, "rb") as f:
             tr = client.audio.transcriptions.create(model="whisper-1", file=f)
