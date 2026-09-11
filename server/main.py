@@ -16,6 +16,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from openai import OpenAI
 
+from server.llm_providers import (
+    FailoverError,
+    UserRequestError,
+    generate_with_failover,
+    load_config,
+    public_llm_status,
+)
 from server.profile_router import build_system_context
 
 # --- Wikipedia helper ---
@@ -151,10 +158,23 @@ app.add_middleware(
 )
 
 if not OPENAI_API_KEY:
-    print("⚠️ Falta OPENAI_API_KEY")
+    print("⚠️ OPENAI_API_KEY ausente (tertiary opcional)")
     client = None
 else:
     client = OpenAI(api_key=OPENAI_API_KEY)
+
+_ERROR_MSGS = {
+    "es": "Lo siento, hubo un problema con el modelo. Intenta de nuevo.",
+    "en": "Sorry, there was a problem with the model. Please try again.",
+    "pt": "Desculpe, houve um problema com o modelo. Tente novamente.",
+    "fr": "Désolé, il y a eu un problème avec le modèle. Veuillez réessayer.",
+    "ar": "عذرًا، كانت هناك مشكلة في النموذج. يرجى المحاولة مرة أخرى.",
+    "hi": "क्षमा करें, मॉडल में कोई समस्या थी। कृपया पुनः प्रयास करें।",
+    "zh": "抱歉，模型出现了问题。请再试一次。",
+    "ru": "Извините, возникла проблема с моделью. Пожалуйста, попробуйте еще раз.",
+    "ja": "申し訳ありませんが、モデルに問題が発生しました。もう一度お試しください。",
+    "ko": "죄송합니다. 모델에 문제가 발생했습니다. 다시 시도해 주세요.",
+}
 
 if not SHEETS_WEBHOOK_URL:
     print("⚠️ Falta SHEET_WEBHOOK / SHEETS_WEBHOOK_URL en variables de entorno")
@@ -219,67 +239,53 @@ def _fallback_detect_lang(text: str) -> str:
 # -------------------------------------------------------
 # FUNCIONES DE OPENAI
 # -------------------------------------------------------
-def call_openai(question: str, lang_hint: Optional[str] = None) -> str:
-    """Llama al modelo forzando el idioma del usuario (incluye ja/ko) y traduce si es necesario."""
-    sys = build_system_context(question, lang_hint=lang_hint)
+def _model_error(lang_hint: Optional[str] = None) -> str:
+    return _ERROR_MSGS.get(lang_hint or "", _ERROR_MSGS["en"])
 
-    if client is None:
+
+def call_openai(question: str, lang_hint: Optional[str] = None) -> str:
+    """Build profile context and call the multi-provider LLM router."""
+    sys = build_system_context(question, lang_hint=lang_hint)
+    cfg = load_config()
+    if not cfg.any_configured():
         return {
             "es": "Lo siento, el modelo no está configurado.",
             "en": "Sorry, the model is not configured.",
         }.get(lang_hint or "", "Sorry, the model is not configured.")
 
     try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": question},
-            ],
-            temperature=OPENAI_TEMP,
-        )
-        answer = (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        print("OpenAI error:", e)
-        error_msgs = {
-            "es": "Lo siento, hubo un problema con el modelo. Intenta de nuevo.",
-            "en": "Sorry, there was a problem with the model. Please try again.",
-            "pt": "Desculpe, houve um problema com o modelo. Tente novamente.",
-            "fr": "Désolé, il y a eu un problème avec le modèle. Veuillez réessayer.",
-            "ar": "عذرًا، كانت هناك مشكلة في النموذج. يرجى المحاولة مرة أخرى.",
-            "hi": "क्षमा करें, मॉडल में कोई समस्या थी। कृपया पुनः प्रयास करें।",
-            "zh": "抱歉，模型出现了问题。请再试一次。",
-            "ru": "Извините, возникла проблема с моделью. Пожалуйста, попробуйте еще раз.",
-            "ja": "申し訳ありませんが、モデルに問題が発生しました。もう一度お試しください。",
-            "ko": "죄송합니다. 모델에 문제가 발생했습니다. 다시 시도해 주세요.",
-        }
-        return error_msgs.get(lang_hint or "", error_msgs["en"])
+        result = generate_with_failover(sys, question, config=cfg)
+        answer = (result.text or "").strip()
+    except UserRequestError:
+        return _model_error(lang_hint)
+    except FailoverError:
+        return _model_error(lang_hint)
+    except Exception:
+        print("LLM router error: provider_failed")
+        return _model_error(lang_hint)
 
-    # Asegurar idioma de salida
     if lang_hint:
         detected_answer_lang = detect_lang(answer)
         if detected_answer_lang != lang_hint:
             try:
                 target_name = LANG_NAME.get(lang_hint, lang_hint)
-                tr = client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": f"Translate into {target_name}. Keep meaning and formatting."},
-                        {"role": "user", "content": answer},
-                    ],
-                    temperature=0.0,
+                tr = generate_with_failover(
+                    f"Translate into {target_name}. Keep meaning and formatting.",
+                    answer,
+                    config=cfg,
                 )
-                answer = (tr.choices[0].message.content or "").strip()
-            except Exception as e:
-                print("Fallback traducción falló:", e)
+                answer = (tr.text or "").strip() or answer
+            except Exception:
+                print("Fallback traducción falló: provider_failed")
 
     return answer
 
 def generate_answer(question: str, lang: Optional[str] = None) -> str:
     """Shared answer path for /chat, WhatsApp text, and WhatsApp audio.
 
-    Detect/use language → build profile context → OpenAI → optional Wikipedia
-    enrichment labeled as external retrieval.
+    Detect/use language → build profile context → provider router
+    (Gemini / OpenRouter / OpenAI) → optional Wikipedia enrichment
+    labeled as external retrieval.
     """
     q = (question or "").strip()
     resolved_lang = lang or detect_lang(q)
@@ -429,7 +435,18 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "root_path": ROOT_PATH}
+    status = public_llm_status()
+    return {
+        "ok": True,
+        "app": "ok",
+        "llm_provider_configured": status["llm_provider_configured"],
+        "root_path": ROOT_PATH,
+    }
+
+
+@app.get("/health/llm")
+def health_llm():
+    return public_llm_status()
 
 @app.post("/chat")
 async def chat_endpoint(body: ChatIn):
