@@ -237,6 +237,34 @@ class ContextAndPromptTests(unittest.TestCase):
         self.assertNotIn("There are two professionals named Ignacio", out)
 
 
+    def test_call_openai_keeps_internal_name_out_of_user_prompt_and_profile_router(self):
+        from server import main as main_mod
+        from server.llm_providers import ProviderCallResult
+        from unittest.mock import patch
+
+        captured = {}
+
+        def fake_generate(system_prompt, user_prompt, config=None):
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return ProviderCallResult(text="El caso cuesta 125.00.", provider="gemini")
+
+        with patch("server.main.load_config") as cfg, patch(
+            "server.main.generate_with_failover", side_effect=fake_generate
+        ):
+            cfg.return_value.any_configured.return_value = True
+            out = main_mod.call_openai(
+                "BUSCA EL CASO DE TERRY CUANTO COSTO?",
+                lang_hint="es",
+                dentodo_context='{"assigned_employee":"Ignacio Ramirez Duran"}',
+            )
+
+        self.assertIn("125.00", out)
+        self.assertEqual(captured["user_prompt"], "BUSCA EL CASO DE TERRY CUANTO COSTO?")
+        self.assertIn("Ignacio Ramirez Duran", captured["system_prompt"])
+        self.assertNotIn("PROFILE_ID=IGNACIO", captured["system_prompt"])
+
+
     def test_generic_question_system_context_has_no_people(self):
         sys = build_system_context("zirconia sintering temperature", lang_hint="en")
         self.assertIn(SYSTEM_PROMPT[:40], sys)
