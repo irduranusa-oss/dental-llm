@@ -220,6 +220,23 @@ class ContextAndPromptTests(unittest.TestCase):
         self.assertIn("Reply ONLY in Spanish", sys)
         self.assertIn("language code: es", sys)
 
+    def test_internal_dentodo_context_does_not_trigger_person_profile(self):
+        from server.main import generate_answer
+        from unittest.mock import patch
+
+        with patch("server.main.call_openai", return_value="El caso cuesta 125.00."):
+            out = generate_answer(
+                "BUSCA EL CASO DE TERRY CUANTO COSTO?",
+                "es",
+                dentodo_context=(
+                    '{"case":{"case_name":"TERRY","assigned_employee":"Ignacio Ramirez Duran"}}'
+                ),
+            )
+        self.assertIn("125.00", out)
+        self.assertNotIn("Ignacio Ramirez Duran", out)
+        self.assertNotIn("There are two professionals named Ignacio", out)
+
+
     def test_generic_question_system_context_has_no_people(self):
         sys = build_system_context("zirconia sintering temperature", lang_hint="en")
         self.assertIn(SYSTEM_PROMPT[:40], sys)
