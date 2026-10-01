@@ -23,7 +23,7 @@ CATEGORY_FAILOVER = "failover"
 CATEGORY_USER = "user"
 CATEGORY_CONFIG = "config"
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT_SECONDS = 75
@@ -31,6 +31,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_INPUT_CHARS = 16000
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_PROVIDER_RETRIES = 1
+DEFAULT_QUOTA_COOLDOWN_SECONDS = 300
 
 GEMINI_URL_TMPL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -132,6 +133,7 @@ class RuntimeStatus:
 
 _STATUS = RuntimeStatus()
 _HTTP = requests.Session()
+_PROVIDER_COOLDOWN_UNTIL: dict[str, float] = {}
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -234,6 +236,26 @@ def reset_runtime_status() -> None:
     _STATUS.attempts = []
 
 
+def _quota_cooldown_seconds() -> int:
+    return _env_int("LLM_QUOTA_COOLDOWN_SECONDS", DEFAULT_QUOTA_COOLDOWN_SECONDS, 30, 86400)
+
+
+def _provider_in_cooldown(provider: str) -> bool:
+    until = float(_PROVIDER_COOLDOWN_UNTIL.get(provider) or 0.0)
+    if until <= time.time():
+        _PROVIDER_COOLDOWN_UNTIL.pop(provider, None)
+        return False
+    return True
+
+
+def _start_quota_cooldown(provider: str) -> None:
+    _PROVIDER_COOLDOWN_UNTIL[provider] = time.time() + _quota_cooldown_seconds()
+
+
+def reset_provider_cooldowns() -> None:
+    _PROVIDER_COOLDOWN_UNTIL.clear()
+
+
 def public_llm_status(config: Optional[LLMConfig] = None) -> dict:
     cfg = config or load_config()
     return {
@@ -250,6 +272,11 @@ def public_llm_status(config: Optional[LLMConfig] = None) -> dict:
         "gemini_model": cfg.gemini_model,
         "openrouter_model": cfg.openrouter_model,
         "openai_model": cfg.openai_model,
+        "provider_cooldowns": {
+            provider: max(0, int(until - time.time()))
+            for provider, until in _PROVIDER_COOLDOWN_UNTIL.items()
+            if until > time.time()
+        },
     }
 
 
@@ -409,6 +436,15 @@ def generate_with_failover(
     reset_runtime_status()
 
     for index, provider in enumerate(providers):
+        if _provider_in_cooldown(provider):
+            last_reason = "quota_cooldown"
+            _safe_log("LLM_PROVIDER_SKIP", provider, "quota_cooldown")
+            _STATUS.attempts.append(provider)
+            nxt = providers[index + 1] if index + 1 < len(providers) else None
+            if nxt:
+                _safe_log("LLM_PROVIDER_FAILOVER", nxt)
+            continue
+
         if not cfg.is_configured(provider):
             last_reason = "missing_key"
             _safe_log("LLM_PROVIDER_FAIL", provider, "missing_key")
@@ -448,6 +484,9 @@ def generate_with_failover(
             except ProviderError as exc:
                 last_reason = exc.reason
                 _safe_log("LLM_PROVIDER_FAIL", provider, exc.reason)
+                if exc.reason == "quota":
+                    _start_quota_cooldown(provider)
+                    break
                 if exc.category == CATEGORY_FAILOVER and exc.retryable and attempt < retries:
                     time.sleep(0.05)
                     continue

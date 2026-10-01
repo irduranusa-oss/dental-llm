@@ -22,6 +22,7 @@ from server.llm_providers import (  # noqa: E402
     generate_with_provider,
     public_llm_status,
     reset_runtime_status,
+    reset_provider_cooldowns,
 )
 from server.profile_router import (  # noqa: E402
     PROFILE_CARLOS,
@@ -94,6 +95,7 @@ class ClassifyTests(unittest.TestCase):
 class FailoverTests(unittest.TestCase):
     def setUp(self):
         reset_runtime_status()
+        reset_provider_cooldowns()
 
     def test_primary_success(self):
         impls = {
@@ -114,6 +116,40 @@ class FailoverTests(unittest.TestCase):
         result = generate_with_failover("sys", "user", config=_cfg(), impls=impls)
         self.assertEqual(result.provider, "openrouter")
         self.assertEqual(result.text, "openrouter-answer")
+
+    def test_quota_enters_cooldown_and_skips_next_request(self):
+        calls = {"gemini": 0}
+
+        def quota(system_prompt, user_prompt, config):
+            calls["gemini"] += 1
+            raise FailoverError("gemini", "quota", retryable=True)
+
+        impls = {
+            "gemini": quota,
+            "openrouter": _ok("fallback"),
+            "openai": _ok("should-not-run"),
+        }
+        first = generate_with_failover("sys", "user", config=_cfg(), impls=impls)
+        second = generate_with_failover("sys", "user", config=_cfg(), impls=impls)
+        self.assertEqual(first.provider, "openrouter")
+        self.assertEqual(second.provider, "openrouter")
+        self.assertEqual(calls["gemini"], 1)
+
+    def test_quota_does_not_retry_same_provider(self):
+        calls = {"gemini": 0}
+
+        def quota(system_prompt, user_prompt, config):
+            calls["gemini"] += 1
+            raise FailoverError("gemini", "quota", retryable=True)
+
+        impls = {
+            "gemini": quota,
+            "openrouter": _ok("fallback"),
+            "openai": _ok("should-not-run"),
+        }
+        result = generate_with_failover("sys", "user", config=_cfg(max_provider_retries=2), impls=impls)
+        self.assertEqual(result.provider, "openrouter")
+        self.assertEqual(calls["gemini"], 1)
 
     def test_primary_timeout_secondary_success(self):
         impls = {
@@ -184,7 +220,7 @@ class FailoverTests(unittest.TestCase):
             generate_with_provider("gemini", "s", "u", config=_cfg(gemini_api_key=""))
 
     def test_default_gemini_model_documented(self):
-        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-2.5-flash")
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-2.5-flash-lite")
 
     def test_status_has_no_secret_fields(self):
         payload = public_llm_status(_cfg())
