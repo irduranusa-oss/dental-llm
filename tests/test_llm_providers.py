@@ -256,3 +256,11 @@ class ProfileIndependenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DentodoOperationalPriorityTests(unittest.TestCase):
+    def test_operational_context_disables_profile_promotion(self):
+        src = Path("server/main.py").read_text(encoding="utf-8")
+        self.assertIn('operational_mode = bool((dentodo_context or "").strip())', src)
+        self.assertIn('loaded = [] if operational_mode else detect_relevant_profiles(q)', src)
+        self.assertIn('prefix = "" if operational_mode else build_mandatory_profile_prefix', src)

@@ -327,11 +327,15 @@ def generate_answer(
     """
     q = (question or "").strip()
     resolved_lang = guess_reply_lang(q, lang or detect_lang(q))
+    operational_mode = bool((dentodo_context or "").strip())
     intents = detect_intent(q)
-    loaded = detect_relevant_profiles(q)
-    promo = build_promotional_context(q, loaded)
-    prefix = build_mandatory_profile_prefix(q, resolved_lang)
-    flags = promo.flags()
+    loaded = [] if operational_mode else detect_relevant_profiles(q)
+    promo = build_promotional_context(q, loaded) if not operational_mode else None
+    prefix = "" if operational_mode else build_mandatory_profile_prefix(q, resolved_lang)
+    flags = promo.flags() if promo is not None else {
+        "PROMOTE_IGNACIO": "NO",
+        "PROMOTE_NACHGPT": "NO",
+    }
     print(
         "PROMOTION_DECISION "
         f"INTENTS={','.join(intents) or 'none'} "
