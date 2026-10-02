@@ -52,6 +52,11 @@ class NachGPTContractTests(unittest.TestCase):
         self.assertIn('"scope": "OWN_CASE"', ctx)
         self.assertTrue(build_role_aware_greeting(p, "es").startswith("Hola, Carlos. A la orden."))
 
+    def test_doctor_honorific_keeps_first_name(self):
+        p = principal(ROLE_CEO, caps=["executive_reports"], name="Dr. Rajan Sheth")
+        greeting = build_role_aware_greeting(p, "en")
+        self.assertTrue(greeting.startswith("Hello, Dr. Rajan. At your service."))
+
     def test_client_cannot_receive_other_client_or_lab_facts(self):
         p = principal(ROLE_CLIENT, caps=["own_case"])
         bad_scope = {
@@ -132,6 +137,19 @@ class NachGPTContractTests(unittest.TestCase):
         with self.assertRaises(NachGPTContractError):
             validate_fact_packet(p_no_global, packet)
 
+        tenant_finance = {
+            "verified": True,
+            "read_only": True,
+            "laboratory_id": "LAB002",
+            "target_laboratory_id": "LAB002",
+            "scope": "LAB",
+            "categories": {"finance": {"published_total": 25}},
+            "sources": ["postgres"],
+        }
+        p_finance_without_global = principal(ROLE_SUPER_ADMIN, lab="", caps=["finance"])
+        with self.assertRaises(NachGPTContractError):
+            validate_fact_packet(p_finance_without_global, tenant_finance)
+
     def test_write_fact_packet_is_rejected_for_every_role(self):
         for role in (ROLE_CLIENT, ROLE_EMPLOYEE, ROLE_SUPERVISOR, ROLE_CEO, ROLE_SUPER_ADMIN):
             lab = "" if role == ROLE_SUPER_ADMIN else "LAB001"
@@ -191,6 +209,7 @@ class EndpointWiringTests(unittest.TestCase):
         self.assertIn('build_nachgpt_fact_context', src)
         self.assertIn('missing_verified_fact_categories', src)
         self.assertIn('route_nachgpt_question', src)
+        self.assertIn('if operational_mode:\n        return answer_text', src)
 
 
 if __name__ == "__main__":
