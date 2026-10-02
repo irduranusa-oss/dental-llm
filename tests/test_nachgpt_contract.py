@@ -252,6 +252,44 @@ class OperationalFallbackTests(unittest.TestCase):
         self.assertIn("Fuentes: processor_run, postgres_cases", answer)
         self.assertIn("No se infirieron causas", answer)
 
+    def test_processor_run_fallback_preserves_zero_false_and_formats_summary(self):
+        from server.nachgpt_operational_fallback import build_operational_fallback
+
+        packet = {
+            "categories": {
+                "processor": {"overall": "HEALTHY"},
+                "intake": {"overall": "HEALTHY"},
+                "processor_run": {
+                    "run_id": 37,
+                    "status": "SUCCESS",
+                    "started_at": "2026-10-02T17:49:47+00:00",
+                    "finished_at": "2026-10-02T18:10:51+00:00",
+                    "processed": 0,
+                    "new_cases": 0,
+                    "case_names": [],
+                    "technical_sheet_file_count": 0,
+                    "technical_sheet_files": [],
+                    "partial": False,
+                    "time_budget_hit": False,
+                    "skipped_already_processed": 3,
+                    "skipped_existing_case": 0,
+                    "repaired_cases": [],
+                    "error": "",
+                    "message": "Procesados 0 correos",
+                },
+            },
+            "sources": ["dental_ai_intake_health_service", "processor_run_audit_service"],
+        }
+        answer = build_operational_fallback("Audita la última corrida del procesador", packet, "es")
+        self.assertIn("Auditoría verificada del procesador", answer)
+        self.assertIn("Correos procesados: 0", answer)
+        self.assertIn("Casos nuevos: 0", answer)
+        self.assertIn("Archivos disponibles en ficha técnica: 0", answer)
+        self.assertIn("Casos omitidos por existir previamente: 0", answer)
+        self.assertIn("Corrida parcial: No", answer)
+        self.assertIn("Límite de tiempo alcanzado: No", answer)
+        self.assertIn("Error registrado: ninguno", answer)
+
     def test_fallback_without_categories_is_not_verified(self):
         from server.nachgpt_operational_fallback import build_operational_fallback
 
