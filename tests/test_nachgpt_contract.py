@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from server.nachgpt_intent_router import missing_required_categories, route_nachgpt_question
 from server.nachgpt_contract import (
     NachGPTContractError,
     ROLE_CEO,
@@ -151,6 +152,34 @@ class NachGPTContractTests(unittest.TestCase):
                 validate_fact_packet(p, packet)
 
 
+class NachGPTIntentRouterTests(unittest.TestCase):
+    def test_processor_audit_requires_processor_and_intake(self):
+        routed = route_nachgpt_question("Audita la última corrida del procesador Gmail")
+        self.assertTrue(routed["operational"])
+        self.assertIn("processor", routed["required_categories"])
+        self.assertIn("intake", routed["required_categories"])
+        missing = missing_required_categories(
+            "Audita la última corrida del procesador Gmail",
+            {"processor": {}},
+        )
+        self.assertEqual(missing, ["intake"])
+
+    def test_r2_case_audit_requires_physical_evidence(self):
+        routed = route_nachgpt_question("Verifica si el caso Pepe está físicamente en R2")
+        self.assertIn("r2_evidence", routed["required_categories"])
+        self.assertIn("case_files", routed["required_categories"])
+
+    def test_hyperdent_audit_needs_case_files_and_production(self):
+        routed = route_nachgpt_question("Audita HyperDent del caso Terry")
+        self.assertIn("hyperdent", routed["required_categories"])
+        self.assertIn("production", routed["required_categories"])
+        self.assertIn("case_files", routed["required_categories"])
+
+    def test_finance_question_routes_to_finance(self):
+        routed = route_nachgpt_question("Dame la facturación publicada de hoy")
+        self.assertIn("finance", routed["required_categories"])
+
+
 class EndpointWiringTests(unittest.TestCase):
     def test_nachgpt_endpoint_is_gateway_protected(self):
         src = (ROOT / "server" / "main.py").read_text(encoding="utf-8")
@@ -160,6 +189,8 @@ class EndpointWiringTests(unittest.TestCase):
         self.assertIn('NACHGPT_OPERATIONAL_READ_ONLY', src)
         self.assertIn('build_role_aware_greeting', src)
         self.assertIn('build_nachgpt_fact_context', src)
+        self.assertIn('missing_verified_fact_categories', src)
+        self.assertIn('route_nachgpt_question', src)
 
 
 if __name__ == "__main__":
