@@ -193,6 +193,8 @@ def validate_fact_packet(principal: dict, fact_packet: dict | None) -> dict:
             raise NachGPTContractError("tenant_mismatch")
         if target_lab and target_lab != p["laboratory_id"]:
             raise NachGPTContractError("cross_tenant_denied")
+    elif (packet_lab or target_lab) and "global_labs" not in set(p.get("capabilities") or []):
+        raise NachGPTContractError("global_labs_capability_required")
 
     categories = packet.get("categories") or {}
     if not isinstance(categories, dict):
@@ -229,9 +231,18 @@ def validate_fact_packet(principal: dict, fact_packet: dict | None) -> dict:
     }
 
 
+def _greeting_name(display_name: str) -> str:
+    parts = [part for part in _clean(display_name, 120).split() if part]
+    if not parts:
+        return ""
+    if parts[0].lower().rstrip(".") in {"dr", "dra", "doctor", "doctora"} and len(parts) > 1:
+        return " ".join(parts[:2])
+    return parts[0]
+
+
 def build_role_aware_greeting(principal: dict, lang: str = "es") -> str:
     p = normalize_principal(principal)
-    name = p["display_name"].split()[0] if p["display_name"] else p["display_name"]
+    name = _greeting_name(p["display_name"])
     is_es = (lang or "es").lower().startswith("es")
     labels = _ROLE_LABEL_ES if is_es else _ROLE_LABEL_EN
     label = labels[p["role"]]
