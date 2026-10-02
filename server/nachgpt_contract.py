@@ -202,7 +202,9 @@ def validate_fact_packet(principal: dict, fact_packet: dict | None) -> dict:
 
     ceiling = role_ceiling(p["role"])
     requested_caps = set(p.get("capabilities") or [])
-    allowed = ceiling if not requested_caps else ceiling & requested_caps
+    if not requested_caps:
+        raise NachGPTContractError("missing_capabilities")
+    allowed = ceiling & requested_caps
     category_names = {_clean(name, 80) for name in categories.keys() if _clean(name, 80)}
     forbidden = sorted(category_names - allowed)
     if forbidden:
