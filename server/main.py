@@ -41,6 +41,7 @@ from server.nachgpt_contract import (
     nachgpt_operational_system_rules,
 )
 from server.nachgpt_intent_router import missing_required_categories, route_nachgpt_question
+from server.nachgpt_operational_fallback import build_operational_fallback
 
 # --- Wikipedia helper ---
 def enrich_with_wikipedia(answer_text: str, user_query: str, lang: Optional[str] = None) -> str:
@@ -592,6 +593,8 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
         lang,
         dentodo_context=operational_context,
     )
+    if answer_text.strip() in _ERROR_MSGS.values():
+        answer_text = build_operational_fallback(q, body.fact_packet, lang)
     final_text = f"{greeting}\n\n{answer_text}".strip()
     _append_history(q, final_text, lang)
     return {
