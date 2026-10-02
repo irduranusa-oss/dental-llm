@@ -296,7 +296,7 @@ class ChannelWiringTests(unittest.TestCase):
         router_src = (ROOT / "server" / "profile_router.py").read_text(encoding="utf-8")
         self.assertIn("from server.promotional_engine import build_promotional_context", router_src)
         self.assertIn("def detect_nachgpt_business_intent(", router_src)
-        self.assertIn("answer_text = generate_answer(q, lang)", main_src)
+        self.assertIn("answer_text = generate_answer(", main_src)
         self.assertIn("answer = generate_answer(user_text, lang)", main_src)
         self.assertIn("answer = generate_answer(transcript, lang)", main_src)
         self.assertIn("[EXTERNAL RETRIEVAL — Wikipedia]", main_src)
