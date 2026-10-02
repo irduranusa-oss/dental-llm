@@ -150,6 +150,19 @@ class NachGPTContractTests(unittest.TestCase):
         with self.assertRaises(NachGPTContractError):
             validate_fact_packet(p_finance_without_global, tenant_finance)
 
+    def test_missing_capabilities_fails_closed(self):
+        p = principal(ROLE_EMPLOYEE, caps=[])
+        packet = {
+            "verified": True,
+            "read_only": True,
+            "laboratory_id": "LAB001",
+            "scope": "ROLE_SCOPE",
+            "categories": {"case": {}},
+            "sources": ["canonical_case"],
+        }
+        with self.assertRaises(NachGPTContractError):
+            validate_fact_packet(p, packet)
+
     def test_write_fact_packet_is_rejected_for_every_role(self):
         for role in (ROLE_CLIENT, ROLE_EMPLOYEE, ROLE_SUPERVISOR, ROLE_CEO, ROLE_SUPER_ADMIN):
             lab = "" if role == ROLE_SUPER_ADMIN else "LAB001"
