@@ -36,9 +36,9 @@ _INTENT_RULES = (
     (INTENT_EXECUTIVE, ("ceo", "reporte ejecutivo", "executive report", "ceo pulse", "resumen ejecutivo"), ("executive_reports",)),
     (INTENT_EMPLOYEES, ("empleado", "empleados", "employee", "employees", "trabajador", "trabajadores"), ("employees",)),
     (INTENT_CLIENTS, ("clientes", "clients", "clinicas", "clínicas", "doctores", "doctors"), ("clients",)),
-    (INTENT_PLATFORM, ("plataforma", "platform", "todos los laboratorios", "all laboratories", "lab001", "lab002", "lab003", "lab004"), ("platform_health",)),
+    (INTENT_PLATFORM, ("plataforma", "platform", "todos los laboratorios", "all laboratories"), ("platform_health",)),
     (INTENT_PRODUCTION, ("produccion", "producción", "production", "fase", "phase", "cola", "queue", "finalizado"), ("production",)),
-    (INTENT_CASE, ("caso", "case", "paciente", "patient", "ficha", "case master"), ("case",)),
+    (INTENT_CASE, ("caso", "case", "paciente", "patient", "ficha del caso", "case master"), ("case",)),
 )
 
 
@@ -48,6 +48,15 @@ def _fold(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip().lower()
 
 
+def _term_matches(folded: str, term: str) -> bool:
+    token = _fold(term)
+    if not token:
+        return False
+    if " " in token:
+        return token in folded
+    return bool(re.search(r"(?<![a-z0-9_])" + re.escape(token) + r"(?![a-z0-9_])", folded))
+
+
 def route_nachgpt_question(question: str) -> dict:
     folded = _fold(question)
     intents: list[str] = []
@@ -55,7 +64,7 @@ def route_nachgpt_question(question: str) -> dict:
     matched_terms: list[str] = []
 
     for intent, terms, categories in _INTENT_RULES:
-        hit = next((term for term in terms if _fold(term) in folded), "")
+        hit = next((term for term in terms if _term_matches(folded, term)), "")
         if not hit:
             continue
         intents.append(intent)
