@@ -40,6 +40,7 @@ from server.nachgpt_contract import (
     build_role_aware_greeting,
     nachgpt_operational_system_rules,
 )
+from server.nachgpt_intent_router import missing_required_categories, route_nachgpt_question
 
 # --- Wikipedia helper ---
 def enrich_with_wikipedia(answer_text: str, user_query: str, lang: Optional[str] = None) -> str:
@@ -566,6 +567,14 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
         greeting = build_role_aware_greeting(body.principal, lang)
     except NachGPTContractError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+
+    routed = route_nachgpt_question(q)
+    missing = missing_required_categories(q, body.fact_packet.get("categories") or {})
+    if routed.get("operational") and missing:
+        raise HTTPException(
+            status_code=409,
+            detail="missing_verified_fact_categories:" + ",".join(missing),
+        )
 
     operational_context = (
         nachgpt_operational_system_rules()
