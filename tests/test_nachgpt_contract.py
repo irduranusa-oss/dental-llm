@@ -227,3 +227,38 @@ class EndpointWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperationalFallbackTests(unittest.TestCase):
+    def test_fallback_uses_verified_categories(self):
+        from server.nachgpt_operational_fallback import build_operational_fallback
+
+        packet = {
+            "categories": {
+                "processor": {"status": "HEALTHY", "processed": 12},
+                "intake": {"overall": "HEALTHY"},
+            },
+            "sources": ["processor_run", "postgres_cases"],
+        }
+        answer = build_operational_fallback(
+            "Audita la ultima corrida del procesador",
+            packet,
+            "es",
+        )
+        self.assertIn("Evidencia verificada de NACHGPT", answer)
+        self.assertIn("processor:", answer)
+        self.assertIn("status: HEALTHY", answer)
+        self.assertIn("processed: 12", answer)
+        self.assertIn("Fuentes: processor_run, postgres_cases", answer)
+        self.assertIn("No se infirieron causas", answer)
+
+    def test_fallback_without_categories_is_not_verified(self):
+        from server.nachgpt_operational_fallback import build_operational_fallback
+
+        answer = build_operational_fallback("Audita", {"categories": {}}, "es")
+        self.assertTrue(answer.startswith("NO VERIFICADO:"))
+
+    def test_endpoint_wires_deterministic_provider_failure_fallback(self):
+        main_src = (ROOT / "server" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("build_operational_fallback", main_src)
+        self.assertIn("if answer_text.strip() in _ERROR_MSGS.values()", main_src)
