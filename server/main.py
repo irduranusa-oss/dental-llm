@@ -34,6 +34,12 @@ from server.profile_router import (
     guess_reply_lang,
 )
 from server.promotional_engine import build_promotional_context
+from server.nachgpt_contract import (
+    NachGPTContractError,
+    build_nachgpt_fact_context,
+    build_role_aware_greeting,
+    nachgpt_operational_system_rules,
+)
 
 # --- Wikipedia helper ---
 def enrich_with_wikipedia(answer_text: str, user_query: str, lang: Optional[str] = None) -> str:
@@ -494,6 +500,13 @@ class ChatIn(BaseModel):
     dentodo_context: Optional[str] = None
     attachment_context: Optional[str] = None
 
+
+class NachGPTChatIn(BaseModel):
+    pregunta: str
+    idioma: Optional[str] = None
+    principal: dict
+    fact_packet: dict
+
 # -------------------------------------------------------
 # ENDPOINTS PRINCIPALES
 # -------------------------------------------------------
@@ -534,6 +547,44 @@ async def chat_endpoint(body: ChatIn):
     
     # 4️⃣ Devolvemos la respuesta
     return {"respuesta": answer_text}
+
+@app.post("/nachgpt/chat")
+async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
+    """Server-to-server NACHGPT operational chat. Verified facts only."""
+    expected = (os.getenv("NACHGPT_GATEWAY_TOKEN") or "").strip()
+    supplied = (request.headers.get("X-NACHGPT-Gateway-Token") or "").strip()
+    if not expected or supplied != expected:
+        raise HTTPException(status_code=403, detail="nachgpt_gateway_forbidden")
+
+    q = (body.pregunta or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Falta 'pregunta'")
+
+    lang = body.idioma or detect_lang(q)
+    try:
+        fact_context = build_nachgpt_fact_context(body.principal, body.fact_packet)
+        greeting = build_role_aware_greeting(body.principal, lang)
+    except NachGPTContractError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    operational_context = (
+        nachgpt_operational_system_rules()
+        + "\n\nVERIFIED_NACHGPT_FACT_PACKET:\n"
+        + fact_context
+    )
+    answer_text = generate_answer(
+        q,
+        lang,
+        dentodo_context=operational_context,
+    )
+    final_text = f"{greeting}\n\n{answer_text}".strip()
+    _append_history(q, final_text, lang)
+    return {
+        "respuesta": final_text,
+        "mode": "NACHGPT_OPERATIONAL_READ_ONLY",
+        "verified_fact_packet": True,
+    }
+
 
 @app.get("/history")
 def get_history():
