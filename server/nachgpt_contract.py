@@ -27,6 +27,9 @@ _ROLE_CEILINGS = {
         "inventory",
         "machines",
         "training",
+        "hyperdent",
+        "blender",
+        "exocad",
     },
     ROLE_SUPERVISOR: {
         "case",
@@ -40,6 +43,10 @@ _ROLE_CEILINGS = {
         "r2_evidence",
         "processor",
         "training",
+        "hyperdent",
+        "blender",
+        "exocad",
+        "backup",
     },
     ROLE_LAB_ADMIN: {
         "case",
@@ -54,6 +61,10 @@ _ROLE_CEILINGS = {
         "processor",
         "training",
         "lab_settings_read",
+        "hyperdent",
+        "blender",
+        "exocad",
+        "backup",
     },
     ROLE_CEO: {
         "case",
@@ -72,6 +83,10 @@ _ROLE_CEILINGS = {
         "employees",
         "clients",
         "lab_settings_read",
+        "hyperdent",
+        "blender",
+        "exocad",
+        "backup",
     },
     ROLE_SUPER_ADMIN: {
         "case",
@@ -92,6 +107,10 @@ _ROLE_CEILINGS = {
         "lab_settings_read",
         "global_labs",
         "platform_health",
+        "hyperdent",
+        "blender",
+        "exocad",
+        "backup",
     },
 }
 
