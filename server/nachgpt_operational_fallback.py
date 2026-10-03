@@ -38,6 +38,9 @@ def _processor_run_summary(categories: dict, lang: str = "es") -> list[str]:
 
     case_names = [str(x).strip() for x in (run.get("case_names") or []) if str(x).strip()]
     file_rows = run.get("technical_sheet_files") if isinstance(run.get("technical_sheet_files"), list) else []
+    created_rows = run.get("created_cases_during_run") if isinstance(run.get("created_cases_during_run"), list) else []
+    updated_rows = run.get("updated_cases_during_run") if isinstance(run.get("updated_cases_during_run"), list) else []
+    files_added_rows = run.get("files_added_during_run") if isinstance(run.get("files_added_during_run"), list) else []
     error = _clean(run.get("error")) or _none_label(lang)
     message = _clean(run.get("message")) or _none_label(lang)
     overall = _clean(intake.get("overall") or processor.get("overall")) or ("UNKNOWN" if lang == "en" else "DESCONOCIDO")
@@ -51,9 +54,12 @@ def _processor_run_summary(categories: dict, lang: str = "es") -> list[str]:
             f"- Started: {_clean(run.get('started_at'))}",
             f"- Finished: {_clean(run.get('finished_at'))}",
             f"- Emails processed: {_clean(run.get('processed'))}",
-            f"- New cases: {_clean(run.get('new_cases'))}",
-            "- Cases created: " + (", ".join(case_names) if case_names else "none"),
-            f"- Technical-sheet files: {_clean(run.get('technical_sheet_file_count'))}",
+            f"- Processor-reported new cases: {_clean(run.get('new_cases'))}",
+            "- Processor-reported created cases: " + (", ".join(case_names) if case_names else "none"),
+            f"- Database-mapped cases created during run: {len(created_rows)}",
+            f"- Database-mapped cases updated during run: {len(updated_rows)}",
+            f"- Files added during run: {_clean(run.get('files_added_during_run_count'))}",
+            f"- Files attached to processor-reported new cases: {_clean(run.get('technical_sheet_file_count'))}",
             f"- Already-processed emails skipped: {_clean(run.get('skipped_already_processed'))}",
             f"- Existing-case skips: {_clean(run.get('skipped_existing_case'))}",
             f"- Repaired cases: {len(run.get('repaired_cases') or [])}",
@@ -71,9 +77,12 @@ def _processor_run_summary(categories: dict, lang: str = "es") -> list[str]:
             f"- Inicio: {_clean(run.get('started_at'))}",
             f"- Fin: {_clean(run.get('finished_at'))}",
             f"- Correos procesados: {_clean(run.get('processed'))}",
-            f"- Casos nuevos: {_clean(run.get('new_cases'))}",
-            "- Casos creados: " + (", ".join(case_names) if case_names else "ninguno"),
-            f"- Archivos disponibles en ficha técnica: {_clean(run.get('technical_sheet_file_count'))}",
+            f"- Casos nuevos reportados por el procesador: {_clean(run.get('new_cases'))}",
+            "- Casos creados reportados por el procesador: " + (", ".join(case_names) if case_names else "ninguno"),
+            f"- Casos creados mapeados en Postgres durante la corrida: {len(created_rows)}",
+            f"- Casos actualizados/tocados mapeados durante la corrida: {len(updated_rows)}",
+            f"- Archivos añadidos durante la corrida: {_clean(run.get('files_added_during_run_count'))}",
+            f"- Archivos asociados a casos nuevos reportados por la corrida: {_clean(run.get('technical_sheet_file_count'))}",
             f"- Correos omitidos por ya procesados: {_clean(run.get('skipped_already_processed'))}",
             f"- Casos omitidos por existir previamente: {_clean(run.get('skipped_existing_case'))}",
             f"- Casos reparados: {len(run.get('repaired_cases') or [])}",
@@ -82,6 +91,43 @@ def _processor_run_summary(categories: dict, lang: str = "es") -> list[str]:
             f"- Error registrado: {error}",
             f"- Mensaje del procesador: {message}",
         ]
+
+    if created_rows:
+        lines.append("Cases created during run:" if lang == "en" else "Casos creados durante la corrida:")
+        for row in created_rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            name = _clean(row.get("patient_name") or row.get("case_name")) or "?"
+            status = _clean(row.get("status")) or "?"
+            count = _clean(row.get("current_file_count"))
+            lines.append(
+                f"- {name} | status: {status} | current files: {count}"
+                if lang == "en"
+                else f"- {name} | estado: {status} | archivos actuales: {count}"
+            )
+
+    if updated_rows:
+        lines.append("Cases updated during run:" if lang == "en" else "Casos actualizados/tocados durante la corrida:")
+        for row in updated_rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            name = _clean(row.get("patient_name") or row.get("case_name")) or "?"
+            status = _clean(row.get("status")) or "?"
+            count = _clean(row.get("current_file_count"))
+            lines.append(
+                f"- {name} | status: {status} | current files: {count} | updated: {_clean(row.get('updated_at'))}"
+                if lang == "en"
+                else f"- {name} | estado: {status} | archivos actuales: {count} | actualizado: {_clean(row.get('updated_at'))}"
+            )
+
+    if files_added_rows:
+        lines.append("Files added during run:" if lang == "en" else "Archivos añadidos durante la corrida:")
+        for row in files_added_rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"- {_clean(row.get('case_name'))}: {_clean(row.get('file_name'))}"
+            )
 
     if file_rows:
         names = []
