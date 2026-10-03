@@ -210,6 +210,17 @@ class NachGPTIntentRouterTests(unittest.TestCase):
         routed = route_nachgpt_question("Dame la facturación publicada de hoy")
         self.assertIn("finance", routed["required_categories"])
 
+    def test_employee_activity_question_does_not_require_case_scope(self):
+        question = (
+            "Audita LAB001 y dime qué acciones realizaron los trabajadores el día de hoy. "
+            "Quiero empleado, hora, caso afectado, acción realizada, estado anterior y posterior si existe, "
+            "y fuente de evidencia."
+        )
+        routed = route_nachgpt_question(question)
+        self.assertEqual(routed["required_categories"], ["employee_activity"])
+        self.assertNotIn("case", routed["required_categories"])
+        self.assertNotIn("case", routed["intents"])
+
 
 class EndpointWiringTests(unittest.TestCase):
     def test_nachgpt_endpoint_is_gateway_protected(self):
@@ -304,6 +315,38 @@ class OperationalFallbackTests(unittest.TestCase):
         self.assertIn("Corrida parcial: No", answer)
         self.assertIn("Límite de tiempo alcanzado: No", answer)
         self.assertIn("Error registrado: ninguno", answer)
+
+    def test_employee_activity_fallback_marks_missing_transition_unverified(self):
+        from server.nachgpt_operational_fallback import build_operational_fallback
+
+        packet = {
+            "categories": {
+                "employee_activity": {
+                    "day": "2026-10-02",
+                    "action_count": 1,
+                    "employee_action_counts": {"Carlos Ortiz": 1},
+                    "actions": [{
+                        "employee_name": "Carlos Ortiz",
+                        "timestamp": "2026-10-02T16:00:00-07:00",
+                        "case_name": "yaubi_etienne_06de47",
+                        "patient_name": "Yaubi Etienne",
+                        "action": "DISENO",
+                        "state_before": "",
+                        "state_after": "EN PROCESO",
+                        "evidence_source": "postgres",
+                    }],
+                }
+            },
+            "sources": ["case_actions_canonical_union"],
+        }
+        answer = build_operational_fallback("Audita acciones de trabajadores de hoy", packet, "es")
+        self.assertIn("Auditoría verificada de actividad de trabajadores", answer)
+        self.assertIn("Carlos Ortiz", answer)
+        self.assertIn("Yaubi Etienne", answer)
+        self.assertIn("acción: DISENO", answer)
+        self.assertIn("estado anterior: NO VERIFICADO", answer)
+        self.assertIn("estado posterior: EN PROCESO", answer)
+        self.assertIn("fuente: postgres", answer)
 
     def test_fallback_without_categories_is_not_verified(self):
         from server.nachgpt_operational_fallback import build_operational_fallback

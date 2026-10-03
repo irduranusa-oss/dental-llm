@@ -143,6 +143,59 @@ def _processor_run_summary(categories: dict, lang: str = "es") -> list[str]:
     return lines
 
 
+def _employee_activity_summary(categories: dict, lang: str = "es") -> list[str]:
+    activity = categories.get("employee_activity") if isinstance(categories.get("employee_activity"), dict) else {}
+    if not activity:
+        return []
+
+    actions = activity.get("actions") if isinstance(activity.get("actions"), list) else []
+    counts = activity.get("employee_action_counts") if isinstance(activity.get("employee_action_counts"), dict) else {}
+    day = _clean(activity.get("day"))
+
+    if lang == "en":
+        lines = [
+            f"Verified employee activity audit for {day}:",
+            f"- Verified actions: {len(actions)}",
+        ]
+        if counts:
+            lines.append("- Actions by employee: " + ", ".join(f"{k}: {v}" for k, v in counts.items()))
+        for row in actions[:100]:
+            if not isinstance(row, dict):
+                continue
+            employee = _clean(row.get("employee_name") or row.get("employee_id")) or "UNKNOWN"
+            ts = _clean(row.get("timestamp")) or "NOT VERIFIED"
+            patient = _clean(row.get("patient_name") or row.get("case_name")) or "NOT VERIFIED"
+            action = _clean(row.get("action")) or "NOT VERIFIED"
+            before = _clean(row.get("state_before")) or "NOT VERIFIED"
+            after = _clean(row.get("state_after")) or "NOT VERIFIED"
+            source = _clean(row.get("evidence_source")) or "NOT VERIFIED"
+            lines.append(
+                f"- {employee} | {ts} | case: {patient} | action: {action} | before: {before} | after: {after} | source: {source}"
+            )
+        return lines
+
+    lines = [
+        f"Auditoría verificada de actividad de trabajadores del {day}:",
+        f"- Acciones verificadas: {len(actions)}",
+    ]
+    if counts:
+        lines.append("- Acciones por empleado: " + ", ".join(f"{k}: {v}" for k, v in counts.items()))
+    for row in actions[:100]:
+        if not isinstance(row, dict):
+            continue
+        employee = _clean(row.get("employee_name") or row.get("employee_id")) or "NO VERIFICADO"
+        ts = _clean(row.get("timestamp")) or "NO VERIFICADO"
+        patient = _clean(row.get("patient_name") or row.get("case_name")) or "NO VERIFICADO"
+        action = _clean(row.get("action")) or "NO VERIFICADO"
+        before = _clean(row.get("state_before")) or "NO VERIFICADO"
+        after = _clean(row.get("state_after")) or "NO VERIFICADO"
+        source = _clean(row.get("evidence_source")) or "NO VERIFICADO"
+        lines.append(
+            f"- {employee} | {ts} | caso: {patient} | acción: {action} | estado anterior: {before} | estado posterior: {after} | fuente: {source}"
+        )
+    return lines
+
+
 def build_operational_fallback(question: str, fact_packet: dict, lang: str = "es") -> str:
     categories = fact_packet.get("categories") if isinstance(fact_packet, dict) else {}
     categories = categories if isinstance(categories, dict) else {}
@@ -154,14 +207,17 @@ def build_operational_fallback(question: str, fact_packet: dict, lang: str = "es
         )
 
     processor_summary = _processor_run_summary(categories, lang)
+    employee_summary = _employee_activity_summary(categories, lang)
     if processor_summary:
         lines = processor_summary
+    elif employee_summary:
+        lines = employee_summary
     elif lang == "en":
         lines = ["Verified NACHGPT evidence:"]
     else:
         lines = ["Evidencia verificada de NACHGPT:"]
 
-    if not processor_summary:
+    if not processor_summary and not employee_summary:
         for category, payload in categories.items():
             if isinstance(payload, dict):
                 lines.extend(_lines_for_mapping(str(category), payload))
