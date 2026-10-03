@@ -269,6 +269,18 @@ class OperationalFallbackTests(unittest.TestCase):
                     "case_names": [],
                     "technical_sheet_file_count": 0,
                     "technical_sheet_files": [],
+                    "created_cases_during_run": [],
+                    "updated_cases_during_run": [
+                        {
+                            "case_name": "subject_c_e8786a",
+                            "patient_name": "Raul Camacho",
+                            "status": "RECIBIDO",
+                            "updated_at": "2026-10-02 18:10:50+00:00",
+                            "current_file_count": 0,
+                        }
+                    ],
+                    "files_added_during_run_count": 0,
+                    "files_added_during_run": [],
                     "partial": False,
                     "time_budget_hit": False,
                     "skipped_already_processed": 3,
@@ -283,8 +295,11 @@ class OperationalFallbackTests(unittest.TestCase):
         answer = build_operational_fallback("Audita la última corrida del procesador", packet, "es")
         self.assertIn("Auditoría verificada del procesador", answer)
         self.assertIn("Correos procesados: 0", answer)
-        self.assertIn("Casos nuevos: 0", answer)
-        self.assertIn("Archivos disponibles en ficha técnica: 0", answer)
+        self.assertIn("Casos nuevos reportados por el procesador: 0", answer)
+        self.assertIn("Casos creados mapeados en Postgres durante la corrida: 0", answer)
+        self.assertIn("Casos actualizados/tocados mapeados durante la corrida: 1", answer)
+        self.assertIn("Archivos añadidos durante la corrida: 0", answer)
+        self.assertIn("Raul Camacho | estado: RECIBIDO | archivos actuales: 0", answer)
         self.assertIn("Casos omitidos por existir previamente: 0", answer)
         self.assertIn("Corrida parcial: No", answer)
         self.assertIn("Límite de tiempo alcanzado: No", answer)
