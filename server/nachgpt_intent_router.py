@@ -34,7 +34,7 @@ _INTENT_RULES = (
     (INTENT_DELIVERY, ("entrega", "delivery", "vencido", "overdue", "tracking", "envio", "envío"), ("delivery",)),
     (INTENT_FINANCE, ("facturacion", "facturación", "factura", "invoice", "cobranza", "saldo", "pago", "finance", "financial"), ("finance",)),
     (INTENT_EXECUTIVE, ("ceo", "reporte ejecutivo", "executive report", "ceo pulse", "resumen ejecutivo"), ("executive_reports",)),
-    (INTENT_EMPLOYEES, ("empleado", "empleados", "employee", "employees", "trabajador", "trabajadores"), ("employees",)),
+    (INTENT_EMPLOYEES, ("acciones de trabajadores", "acciones de empleados", "actividad de trabajadores", "actividad de empleados", "trabajador", "trabajadores", "empleado", "empleados", "employee", "employees"), ("employee_activity",)),
     (INTENT_CLIENTS, ("clientes", "clients", "clinicas", "clínicas", "doctores", "doctors"), ("clients",)),
     (INTENT_PLATFORM, ("plataforma", "platform", "todos los laboratorios", "all laboratories"), ("platform_health",)),
     (INTENT_PRODUCTION, ("produccion", "producción", "production", "fase", "phase", "cola", "queue", "finalizado"), ("production",)),
@@ -72,6 +72,10 @@ def route_nachgpt_question(question: str) -> dict:
         for category in categories:
             if category not in required:
                 required.append(category)
+
+    if INTENT_EMPLOYEES in intents and "employee_activity" in required:
+        required = [category for category in required if category != "case"]
+        intents = [intent for intent in intents if intent != INTENT_CASE]
 
     if INTENT_CASE in intents and any(x in intents for x in (INTENT_STORAGE, INTENT_HYPERDENT, INTENT_BLENDER, INTENT_EXOCAD)):
         if "case_files" not in required:
