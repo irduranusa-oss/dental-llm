@@ -551,6 +551,9 @@ async def chat_endpoint(body: ChatIn):
         dentodo_context=(body.dentodo_context or "").strip(),
         attachment_context=(body.attachment_context or "").strip(),
     )
+    # Upstream provider failures must not be mislabeled as successful chat replies.
+    if answer_text.strip() in _ERROR_MSGS.values() or not answer_text.strip():
+        raise HTTPException(status_code=503, detail="llm_provider_unavailable")
     _append_history(q, answer_text, lang)
     
     # 4️⃣ Devolvemos la respuesta
