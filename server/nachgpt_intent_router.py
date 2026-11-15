@@ -57,8 +57,25 @@ def _term_matches(folded: str, term: str) -> bool:
     return bool(re.search(r"(?<![a-z0-9_])" + re.escape(token) + r"(?![a-z0-9_])", folded))
 
 
+def _is_author_book_question(folded: str) -> bool:
+    # A request about an author's general method is not a request for case data.
+    # No access grant: contract validation still requires a verified training fact.
+    personal = ("mi libro","mi workflow","mi flujo de trabajo","mi protocolo",
+                "mi criterio profesional","mi personalidad","criterio del autor",
+                "protocolo del autor","libro aox","libro all-on-x","metodo de ignacio",
+                "mis seis capitulos")
+    return any(term in folded for term in personal) and not any(
+        term in folded for term in ("este caso","caso actual","caso del paciente")
+    )
+
+
 def route_nachgpt_question(question: str) -> dict:
     folded = _fold(question)
+    if _is_author_book_question(folded):
+        return {
+            "operational":True, "intents":["author_workflow"],
+            "required_categories":["training"], "matched_terms":["author_workflow"],
+        }
     intents: list[str] = []
     required: list[str] = []
     matched_terms: list[str] = []
