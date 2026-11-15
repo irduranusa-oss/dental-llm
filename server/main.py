@@ -1,3 +1,4 @@
+import hmac
 # --- IMPORTS ---
 import os
 import re
@@ -599,7 +600,7 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
     if answer_text.strip() in _ERROR_MSGS.values():
         answer_text = build_operational_fallback(q, body.fact_packet, lang)
     final_text = f"{greeting}\n\n{answer_text}".strip()
-    _append_history(q, final_text, lang)
+    # Operational answers can contain tenant-specific facts: never place them in global history.
     return {
         "respuesta": final_text,
         "mode": "NACHGPT_OPERATIONAL_READ_ONLY",
@@ -608,8 +609,12 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
 
 
 @app.get("/history")
-def get_history():
-    """Devuelve el historial de conversaciones"""
+def get_history(request: Request):
+    """History is internal-only; never expose conversations to anonymous callers."""
+    expected = (os.getenv("NACHGPT_GATEWAY_TOKEN") or "").strip()
+    supplied = (request.headers.get("X-NACHGPT-Gateway-Token") or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="history_forbidden")
     return {"history": "\n".join(HISTORY_LOG)}
 
 @app.get("/webhook")
