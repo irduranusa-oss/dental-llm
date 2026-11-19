@@ -43,6 +43,7 @@ from server.nachgpt_contract import (
 )
 from server.nachgpt_intent_router import missing_required_categories, route_nachgpt_question
 from server.nachgpt_operational_fallback import build_operational_fallback
+from server.nachgpt_verified_audit_answers import verified_audit_answer
 
 # --- Wikipedia helper ---
 def enrich_with_wikipedia(answer_text: str, user_query: str, lang: Optional[str] = None) -> str:
@@ -589,6 +590,16 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
             status_code=409,
             detail="missing_verified_fact_categories:" + ",".join(missing),
         )
+
+    # High-impact operational audits must answer directly from verified records.
+    # Do not ask a probabilistic model to invent send confirmations or records.
+    audited = verified_audit_answer(q, body.fact_packet.get("categories") or {}, lang)
+    if audited is not None:
+        return {
+            "respuesta": f"{greeting}\n\n{audited}",
+            "mode": "NACHGPT_OPERATIONAL_READ_ONLY",
+            "verified_fact_packet": True,
+        }
 
     operational_context = (
         nachgpt_operational_system_rules()
