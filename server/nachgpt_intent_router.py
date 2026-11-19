@@ -4,6 +4,7 @@ import re
 import unicodedata
 
 INTENT_CASE = "case"
+INTENT_CASE_OVERVIEW = "case_overview"
 INTENT_PROCESSOR = "processor"
 INTENT_STORAGE = "storage"
 INTENT_BACKUP = "backup"
@@ -23,6 +24,7 @@ INTENT_CLIENTS = "clients"
 INTENT_PLATFORM = "platform"
 
 _INTENT_RULES = (
+    (INTENT_CASE_OVERVIEW, ("casos creados", "casos nuevos", "casos recibidos", "casos ingresados", "casos de esta semana", "cases created", "new cases this week"), ("case_overview",)),
     (INTENT_PROCESSOR, ("procesador", "processor", "gmail", "correo", "email intake", "ultima corrida", "última corrida"), ("processor", "intake")),
     (INTENT_STORAGE, ("r2", "archivo fisico", "archivo físico", "object key", "storage", "guardado en nube", "archivos en nube"), ("r2_evidence",)),
     (INTENT_BACKUP, ("dropbox", "backup", "respaldo", "oauth", "refresh token", "access token"), ("backup", "r2_evidence")),

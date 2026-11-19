@@ -34,6 +34,7 @@ _ROLE_CEILINGS = {
     },
     ROLE_SUPERVISOR: {
         "case",
+        "case_overview",
         "case_files",
         "production",
         "inventory",
@@ -54,6 +55,7 @@ _ROLE_CEILINGS = {
     },
     ROLE_LAB_ADMIN: {
         "case",
+        "case_overview",
         "case_files",
         "production",
         "inventory",
@@ -76,6 +78,7 @@ _ROLE_CEILINGS = {
     },
     ROLE_CEO: {
         "case",
+        "case_overview",
         "case_files",
         "production",
         "inventory",
@@ -102,6 +105,7 @@ _ROLE_CEILINGS = {
     },
     ROLE_SUPER_ADMIN: {
         "case",
+        "case_overview",
         "case_files",
         "production",
         "inventory",
