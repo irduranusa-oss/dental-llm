@@ -67,6 +67,7 @@ _ROLE_CEILINGS = {
         "processor_run",
         "employee_activity",
         "training",
+        "purchases",
         "lab_settings_read",
         "hyperdent",
         "blender",
@@ -88,6 +89,7 @@ _ROLE_CEILINGS = {
         "processor_run",
         "training",
         "finance",
+        "purchases",
         "executive_reports",
         "employees",
         "employee_activity",
@@ -113,6 +115,7 @@ _ROLE_CEILINGS = {
         "processor_run",
         "training",
         "finance",
+        "purchases",
         "executive_reports",
         "employees",
         "employee_activity",
@@ -218,6 +221,8 @@ def validate_fact_packet(principal: dict, fact_packet: dict | None) -> dict:
     if not requested_caps:
         raise NachGPTContractError("missing_capabilities")
     allowed = ceiling & requested_caps
+    if "finance" not in requested_caps:
+        allowed.discard("purchases")
     category_names = {_clean(name, 80) for name in categories.keys() if _clean(name, 80)}
     forbidden = sorted(category_names - allowed)
     if forbidden:
