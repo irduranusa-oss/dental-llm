@@ -54,6 +54,26 @@ def verified_audit_answer(question: str, categories: dict, lang: str = "es") -> 
         lines.append(f"Fuente: {activity.get('source') or 'NO VERIFICADO'}. La ausencia de registros no prueba ausencia de trabajo.")
         return "\n".join(lines)
 
+    if "sent_cases_overview" in cats and any(term in q for term in
+            ("casos enviados", "casos despachados", "shipped cases", "cases shipped")):
+        overview = cats.get("sent_cases_overview") or {}
+        if not isinstance(overview, dict) or not overview.get("ok"):
+            return "NO VERIFICADO: falta el historial de casos enviados."
+        start = overview.get("period_start")
+        end = overview.get("period_end")
+        count = overview.get("sent_count")
+        lines = [f"Casos enviados de LAB001 del {start} al {end}: {count if count is not None else 'conteo incompleto'}." ]
+        for item in (overview.get("cases") or [])[:100]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- {item.get('case_name') or '?'} | enviado: {item.get('sent_date') or '?'} | "
+                         f"rastreo: {item.get('tracking') or 'NO VERIFICADO'} | "
+                         f"estado: {item.get('current_status') or 'NO VERIFICADO'}")
+        if overview.get("truncated"):
+            lines.append("Listado parcial; se necesita paginación para consultar todos los envíos.")
+        lines.append("Fuente: casos enviados canónicos (R2/PostgreSQL), fecha de envío corroborada.")
+        return "\n".join(lines)
+
     if "case_overview" in cats and any(term in q for term in
             ("casos creados", "casos nuevos", "casos de esta semana", "cases created", "new cases")):
         overview = cats.get("case_overview") or {}
