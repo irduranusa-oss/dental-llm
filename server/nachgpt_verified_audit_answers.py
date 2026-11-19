@@ -69,6 +69,11 @@ def verified_audit_answer(question: str, categories: dict, lang: str = "es") -> 
             lines.append(f"- {item.get('case_name') or '?'} | enviado: {item.get('sent_date') or '?'} | "
                          f"rastreo: {item.get('tracking') or 'NO VERIFICADO'} | "
                          f"estado: {item.get('current_status') or 'NO VERIFICADO'}")
+            invoice = item.get('invoice_audit')
+            if isinstance(invoice, dict):
+                lines.append(f"  Factura: {invoice.get('status') or 'NO VERIFICADO'}; "
+                             f"IDs: {', '.join(invoice.get('invoice_ids') or []) or 'NO VERIFICADO'}. "
+                             "La presencia de la factura no certifica precio ni orden de trabajo.")
         if overview.get("truncated"):
             lines.append("Listado parcial; se necesita paginación para consultar todos los envíos.")
         lines.append("Fuente: casos enviados canónicos (R2/PostgreSQL), fecha de envío corroborada.")
