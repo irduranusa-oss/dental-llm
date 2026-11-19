@@ -99,6 +99,14 @@ def route_nachgpt_question(question: str) -> dict:
     if INTENT_EMPLOYEES in intents and "employee_activity" in required:
         required = [category for category in required if category != "case"]
         intents = [intent for intent in intents if intent != INTENT_CASE]
+    if INTENT_SENT_CASES_OVERVIEW in intents:
+        # A laboratory-wide shipment audit already contains per-shipment
+        # tracking and role-redacted invoice evidence. Neither a specific
+        # case name nor a separate delivery/finance FACT PACK is required.
+        required = [category for category in required
+                    if category not in {"case", "delivery", "finance"}]
+        intents = [intent for intent in intents if intent not in
+                   {INTENT_CASE, INTENT_DELIVERY, INTENT_FINANCE}]
 
     if INTENT_CASE in intents and any(x in intents for x in (INTENT_STORAGE, INTENT_HYPERDENT, INTENT_BLENDER, INTENT_EXOCAD)):
         if "case_files" not in required:
