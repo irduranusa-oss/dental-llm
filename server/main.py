@@ -580,7 +580,10 @@ async def nachgpt_chat_endpoint(body: NachGPTChatIn, request: Request):
         raise HTTPException(status_code=403, detail=str(exc))
 
     routed = route_nachgpt_question(q)
-    missing = missing_required_categories(q, body.fact_packet.get("categories") or {})
+    missing = missing_required_categories(
+        q, body.fact_packet.get("categories") or {},
+        role=str(body.principal.get("role") or ""),
+    )
     if routed.get("operational") and missing:
         raise HTTPException(
             status_code=409,

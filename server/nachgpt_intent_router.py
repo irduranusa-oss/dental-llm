@@ -11,6 +11,7 @@ INTENT_HYPERDENT = "hyperdent"
 INTENT_BLENDER = "blender"
 INTENT_EXOCAD = "exocad"
 INTENT_INVENTORY = "inventory"
+INTENT_PURCHASES = "purchases"
 INTENT_MACHINES = "machines"
 INTENT_PRODUCTION = "production"
 INTENT_QUALITY = "quality"
@@ -28,6 +29,7 @@ _INTENT_RULES = (
     (INTENT_HYPERDENT, ("hyperdent", "hdproj", "hdprojz", "nesting"), ("hyperdent", "production", "case_files")),
     (INTENT_BLENDER, ("blender", "b4d", "ibar", "hybrid", "tubos"), ("blender", "production", "case_files")),
     (INTENT_EXOCAD, ("exocad",), ("exocad", "production", "case_files")),
+    (INTENT_PURCHASES, ("compras", "ordenes de compra", "orden de compra", "purchases", "purchase orders", "purchase order", "recepcion de compras"), ("purchases",)),
     (INTENT_INVENTORY, ("inventario", "inventory", "zirconia", "pmma", "titania", "material"), ("inventory",)),
     (INTENT_MACHINES, ("maquina", "máquina", "machines", "fresadora", "milling", "imes", "roland", "smill"), ("machines", "production")),
     (INTENT_QUALITY, ("calidad", "quality", "remake", "repeticion", "repetición", "incidencia"), ("quality",)),
@@ -106,7 +108,20 @@ def route_nachgpt_question(question: str) -> dict:
     }
 
 
-def missing_required_categories(question: str, categories: dict | None) -> list[str]:
+def missing_required_categories(question: str, categories: dict | None, *, role: str = "") -> list[str]:
     routed = route_nachgpt_question(question)
+    required = list(routed["required_categories"])
+    if str(role or "").upper() == "CLIENT":
+        # NACHGPT sends only authorized OWN_CASE evidence, not general case facts.
+        # Do not remap finance/processor requests: those remain forbidden.
+        own_case_map = {
+            "case": "own_case",
+            "case_files": "own_case_files",
+            "r2_evidence": "own_case_files",
+            "delivery": "own_case_tracking",
+        }
+        required = [own_case_map.get(name, name) for name in required]
+    if "employee_activity" in required:
+        required = [name for name in required if name != "case"]
     present = set((categories or {}).keys()) if isinstance(categories, dict) else set()
-    return [name for name in routed["required_categories"] if name not in present]
+    return sorted({name for name in required if name not in present})
